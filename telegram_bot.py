@@ -523,8 +523,5 @@ class TelegramBot:
                 logger.error(f"Notify error: {e2}")
 
     def run(self):
-        import asyncio as _asyncio
-        loop = _asyncio.new_event_loop()
-        _asyncio.set_event_loop(loop)
-        logger.info("📱 Telegram polling iniciado")
-        self.app.run_polling(drop_pending_updates=True)
+        """Mantido para compatibilidade — use main_async() no main.py"""
+        logger.info("📱 Telegram run() chamado")
