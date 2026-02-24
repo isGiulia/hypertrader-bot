@@ -13,6 +13,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 import anthropic
+from dotenv import load_dotenv
+load_dotenv()
 from hyperliquid_client import HyperliquidClient
 from market_analyzer import MarketAnalyzer
 from risk_manager import RiskManager
@@ -496,11 +498,19 @@ class HyperTraderAgent:
     def _notify(self, msg: str):
         if self.telegram_bot and CONFIG["telegram_chat_id"]:
             try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(
-                    self.telegram_bot.notify(CONFIG["telegram_chat_id"], msg)
-                )
-                loop.close()
+                import concurrent.futures
+                def _send():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(
+                            self.telegram_bot.notify(CONFIG["telegram_chat_id"], msg)
+                        )
+                    finally:
+                        loop.close()
+                t = threading.Thread(target=_send, daemon=True)
+                t.start()
+                t.join(timeout=10)
             except Exception as e:
                 logger.error(f"Telegram notify error: {e}")
 
@@ -590,8 +600,18 @@ if __name__ == "__main__":
             from telegram_bot import TelegramBot
             tg = TelegramBot(agent, CONFIG["telegram_token"])
             agent.telegram_bot = tg
-            threading.Thread(target=tg.run, daemon=True).start()
+
+            def run_telegram():
+                import asyncio as _asyncio
+                loop = _asyncio.new_event_loop()
+                _asyncio.set_event_loop(loop)
+                tg.app.run_polling(drop_pending_updates=True)
+
+            tg_thread = threading.Thread(target=run_telegram, daemon=True)
+            tg_thread.start()
             logger.info("📱 Telegram Bot ativo")
+            import time; time.sleep(3)  # aguarda bot iniciar
+
         asyncio.run(agent.run_autonomous())
     else:
         print("\n🤖 HyperTrader — Modo Interativo")
