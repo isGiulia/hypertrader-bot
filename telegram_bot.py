@@ -92,34 +92,34 @@ class TelegramBot:
         modo = "🔴 LIVE" if not CONFIG["dry_run"] else "🔵 DRY RUN"
         rede = "MAINNET" if not CONFIG["use_testnet"] else "TESTNET"
         await update.message.reply_text(
-            f"🤖 *HyperTrader AI Agent*\n"
+            f"🤖 <b>HyperTrader AI Agent</b>\n"
             f"{'─'*30}\n"
-            f"Rede: `{rede}` | Modo: `{modo}`\n"
+            f"Rede: `{rede}<code> | Modo: </code>{modo}`\n"
             f"Pares: `{', '.join(CONFIG['symbols'][:5])}...`\n\n"
             f"Use os botões ou envie qualquer mensagem para falar com o agente.",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
     @auth
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         m = await update.message.reply_text("⏳ Buscando...")
-        await m.edit_text(await self._status_text(), parse_mode="Markdown")
+        await m.edit_text(await self._status_text(), parse_mode="HTML")
 
     @auth
     async def cmd_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         m = await update.message.reply_text("⏳ Calculando P&L...")
-        await m.edit_text(await self._pnl_text(), parse_mode="Markdown")
+        await m.edit_text(await self._pnl_text(), parse_mode="HTML")
 
     @auth
     async def cmd_posicoes(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         m = await update.message.reply_text("⏳ Carregando...")
-        await m.edit_text(self._positions_text(), parse_mode="Markdown")
+        await m.edit_text(self._positions_text(), parse_mode="HTML")
 
     @auth
     async def cmd_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         m = await update.message.reply_text("⏳ Calculando...")
-        await m.edit_text(await self._pnl_text(), parse_mode="Markdown")
+        await m.edit_text(await self._pnl_text(), parse_mode="HTML")
 
     @auth
     async def cmd_analisar(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -134,25 +134,25 @@ class TelegramBot:
                 None, self.agent.generate_daily_report
             )
             await m.edit_text(
-                f"📋 *RELATÓRIO DE SESSÃO*\n\n{report[:4000]}",
-                parse_mode="Markdown"
+                f"📋 <b>RELATÓRIO DE SESSÃO</b>\n\n{report[:4000]}",
+                parse_mode="HTML"
             )
         except Exception as e:
             await m.edit_text(f"❌ Erro: {e}")
 
     @auth
     async def cmd_historico(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(self._history_text(), parse_mode="Markdown")
+        await update.message.reply_text(self._history_text(), parse_mode="HTML")
 
     @auth
     async def cmd_pausar(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         self.agent.paused = True
-        await update.message.reply_text("⏸ *Bot pausado.* Novas análises suspensas.", parse_mode="Markdown")
+        await update.message.reply_text("⏸ *Bot pausado.* Novas análises suspensas.", parse_mode="HTML")
 
     @auth
     async def cmd_retomar(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         self.agent.paused = False
-        await update.message.reply_text("▶️ *Bot retomado!*", parse_mode="Markdown")
+        await update.message.reply_text("▶️ *Bot retomado!*", parse_mode="HTML")
 
     @auth
     async def cmd_fechar(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -166,13 +166,13 @@ class TelegramBot:
         pos = self.agent.active_positions[sym]
         cur = self.agent.hl.get_mark_price(sym)
         self.agent._close_position(sym, pos, cur, "Manual via Telegram")
-        await update.message.reply_text(f"✅ Posição *{sym}* fechada manualmente.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Posição *{sym}* fechada manualmente.", parse_mode="HTML")
 
     @auth
     async def cmd_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         from main import CONFIG
         text = (
-            f"⚙️ *Configuração Atual*\n{'─'*28}\n"
+            f"⚙️ <b>Configuração Atual</b>\n{'─'*28}\n"
             f"🌐 Rede: `{'MAINNET' if not CONFIG['use_testnet'] else 'TESTNET'}`\n"
             f"⚙️ Modo: `{'LIVE 🔴' if not CONFIG['dry_run'] else 'DRY RUN 🔵'}`\n"
             f"🎯 Pares: `{len(CONFIG['symbols'])} símbolos`\n"
@@ -186,7 +186,7 @@ class TelegramBot:
             f"🔍 Pares monitorados:\n"
             f"`{', '.join(CONFIG['symbols'])}`"
         )
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="HTML")
 
     @auth
     async def cmd_alavancagem(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -197,19 +197,19 @@ class TelegramBot:
                 None, self.agent.hl.get_asset_info
             )
             from main import CONFIG
-            lines = [f"🔢 *Alavancagem Máxima — Hyperliquid*", f"{'─'*32}"]
+            lines = [f"🔢 <b>Alavancagem Máxima — Hyperliquid</b>", f"{'─'*32}"]
             for sym in CONFIG["symbols"]:
                 info = lev_map.get(sym, {})
                 lev  = info.get("maxLeverage", "?")
                 only_iso = info.get("onlyIsolated", False)
                 iso_label = " ⚠️ somente isolado" if only_iso else ""
-                lines.append(f"  `{sym:<6}` → `{lev}x`{iso_label}")
+                lines.append(f"  `{sym:<6}<code> → </code>{lev}x`{iso_label}")
             lines += [
                 f"{'─'*32}",
                 f"ℹ️ Fonte: API Hyperliquid em tempo real",
                 f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}",
             ]
-            await m.edit_text("\n".join(lines), parse_mode="Markdown")
+            await m.edit_text("\n".join(lines), parse_mode="HTML")
         except Exception as e:
             await m.edit_text(f"❌ Erro: {e}")
 
@@ -231,7 +231,7 @@ class TelegramBot:
             "/alavancagem — Limites de alavancagem por moeda\n"
             "/ajuda — Esta mensagem\n\n"
             "💬 Envie qualquer texto para conversar com o agente AI!",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -246,22 +246,22 @@ class TelegramBot:
 
         try:
             if d == "status":
-                await q.edit_message_text(await self._status_text(), parse_mode="Markdown")
+                await q.edit_message_text(await self._status_text(), parse_mode="HTML")
             elif d == "pnl":
-                await q.edit_message_text(await self._pnl_text(), parse_mode="Markdown")
+                await q.edit_message_text(await self._pnl_text(), parse_mode="HTML")
             elif d == "posicoes":
-                await q.edit_message_text(self._positions_text(), parse_mode="Markdown")
+                await q.edit_message_text(self._positions_text(), parse_mode="HTML")
             elif d == "historico":
-                await q.edit_message_text(self._history_text(), parse_mode="Markdown")
+                await q.edit_message_text(self._history_text(), parse_mode="HTML")
             elif d == "relatorio":
                 await q.edit_message_text("📋 Gerando relatório...")
                 report = await asyncio.get_event_loop().run_in_executor(
                     None, self.agent.generate_daily_report
                 )
-                await q.edit_message_text(f"📋 *RELATÓRIO*\n\n{report[:4000]}", parse_mode="Markdown")
+                await q.edit_message_text(f"📋 <b>RELATÓRIO</b>\n\n{report[:4000]}", parse_mode="HTML")
             elif d.startswith("analisar_"):
                 sym = d.split("_", 1)[1]
-                await q.edit_message_text(f"🔍 Analisando *{sym}*...", parse_mode="Markdown")
+                await q.edit_message_text(f"🔍 Analisando *{sym}*...", parse_mode="HTML")
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, self.agent.analyze_market, sym
                 )
@@ -283,11 +283,11 @@ class TelegramBot:
                         InlineKeyboardButton(f"⚡ Executar {signal['signal']}", callback_data=f"exec_{sym}"),
                         InlineKeyboardButton("❌ Ignorar", callback_data="ignorar")
                     ]])
-                await q.edit_message_text(reply, parse_mode="Markdown", reply_markup=markup)
+                await q.edit_message_text(reply, parse_mode="HTML", reply_markup=markup)
 
             elif d.startswith("exec_"):
                 sym = d.split("_", 1)[1]
-                await q.edit_message_text(f"⚡ Executando *{sym}*...", parse_mode="Markdown")
+                await q.edit_message_text(f"⚡ Executando *{sym}*...", parse_mode="HTML")
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, self.agent.analyze_market, sym
                 )
@@ -298,25 +298,25 @@ class TelegramBot:
                     )
                     await q.edit_message_text(
                         f"✅ Trade *{sym}* — `{exec_r.get('status')}`",
-                        parse_mode="Markdown"
+                        parse_mode="HTML"
                     )
                 else:
                     await q.edit_message_text("⚠️ Sinal expirado. Nenhum trade executado.")
 
             elif d == "pausar":
                 self.agent.paused = True
-                await q.edit_message_text("⏸ *Bot pausado.*", parse_mode="Markdown")
+                await q.edit_message_text("⏸ *Bot pausado.*", parse_mode="HTML")
             elif d == "retomar":
                 self.agent.paused = False
-                await q.edit_message_text("▶️ *Bot retomado!*", parse_mode="Markdown")
+                await q.edit_message_text("▶️ *Bot retomado!*", parse_mode="HTML")
             elif d == "config":
                 from main import CONFIG
                 await q.edit_message_text(
-                    f"⚙️ *Config*\nPares: `{len(CONFIG['symbols'])}` | "
+                    f"⚙️ <b>Config</b>\nPares: `{len(CONFIG['symbols'])}` | "
                     f"MaxPos: `{CONFIG['max_positions']}` | "
                     f"Risco: `{CONFIG['risk_per_trade']*100:.1f}%` | "
                     f"Lev: `{CONFIG['max_leverage']}x`",
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
             elif d == "ignorar":
                 await q.edit_message_text("❌ Sinal ignorado.")
@@ -331,9 +331,9 @@ class TelegramBot:
                     lev  = info.get("maxLeverage", "?")
                     used = sym in self.agent.active_positions
                     tag  = " 🟢" if used else ""
-                    lines.append(f"  `{sym:<6}` → `{lev}x`{tag}")
+                    lines.append(f"  `{sym:<6}<code> → </code>{lev}x`{tag}")
                 lines.append(f"\n🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
-                await q.edit_message_text("\n".join(lines), parse_mode="Markdown")
+                await q.edit_message_text("\n".join(lines), parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"Callback error [{d}]: {e}")
@@ -356,7 +356,7 @@ class TelegramBot:
             )
             if len(resp) > 4000:
                 resp = resp[:4000] + "\n...[truncado]"
-            await m.edit_text(resp, parse_mode="Markdown")
+            await m.edit_text(resp, parse_mode="HTML")
         except Exception as e:
             await m.edit_text(f"❌ Erro: {e}")
 
@@ -376,17 +376,17 @@ class TelegramBot:
             total  = self.agent.stats["total"]
             wr     = round(self.agent.stats["wins"] / total * 100, 1) if total > 0 else 0
             return (
-                f"🤖 *HyperTrader — Status*\n{'─'*30}\n"
+                f"🤖 <b>HyperTrader — Status</b>\n{'─'*30}\n"
                 f"{'⏸ PAUSADO' if self.agent.paused else '✅ RODANDO'}\n"
                 f"🌐 `{'TESTNET' if CONFIG['use_testnet'] else 'MAINNET'}` | "
                 f"`{'DRY RUN' if CONFIG['dry_run'] else '🔴 LIVE'}`\n\n"
-                f"💰 *Equity:* `${equity:,.2f}`\n"
-                f"📊 *Margin:* `${margin:,.2f}`\n"
-                f"🆓 *Free:* `${free:,.2f}`\n\n"
-                f"📈 *Posições abertas:* `{len(self.agent.active_positions)}/{CONFIG['max_positions']}`\n"
-                f"💵 *P&L Sessão:* `${self.agent.session_pnl:+.2f}`\n"
-                f"🏆 *Win Rate:* `{wr}%` ({self.agent.stats['wins']}W/{self.agent.stats['losses']}L)\n"
-                f"📋 *Trades total:* `{total}`\n\n"
+                f"💰 <b>Equity:</b> `${equity:,.2f}`\n"
+                f"📊 <b>Margin:</b> `${margin:,.2f}`\n"
+                f"🆓 <b>Free:</b> `${free:,.2f}`\n\n"
+                f"📈 <b>Posições abertas:</b> `{len(self.agent.active_positions)}/{CONFIG['max_positions']}`\n"
+                f"💵 <b>P&L Sessão:</b> `${self.agent.session_pnl:+.2f}`\n"
+                f"🏆 <b>Win Rate:</b> `{wr}%` ({self.agent.stats['wins']}W/{self.agent.stats['losses']}L)\n"
+                f"📋 <b>Trades total:</b> `{total}`\n\n"
                 f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
             )
         except Exception as e:
@@ -413,8 +413,8 @@ class TelegramBot:
                 tp_status = "✅TP1 atingido" if pos.get("tp1_hit") else f"TP1: ${pos['tp1']:,.4f}"
                 lines.append(
                     f"\n{em} *{sym}* | {dl} {pos['leverage']}x\n"
-                    f"  Entrada: `${pos['entry']:,.4f}` → Atual: `${cur:,.4f}`\n"
-                    f"  P&L: `{pl:+.2f}%` (`${pu:+.2f}`)\n"
+                    f"  Entrada: `${pos['entry']:,.4f}<code> → Atual: </code>${cur:,.4f}`\n"
+                    f"  P&L: `{pl:+.2f}%<code> (</code>${pu:+.2f}`)\n"
                     f"  SL: `${pos['stop_loss']:,.4f}` | {tp_status}"
                 )
         else:
@@ -422,14 +422,14 @@ class TelegramBot:
 
         lines += [
             f"\n{'─'*32}",
-            f"📈 *Não realizado:* `${unreal:+.2f}`",
-            f"💵 *Realizado (sessão):* `${self.agent.session_pnl:+.2f}`",
-            f"💰 *P&L Total:* `${(self.agent.session_pnl + unreal):+.2f}`",
+            f"📈 <b>Não realizado:</b> `${unreal:+.2f}`",
+            f"💵 <b>Realizado (sessão):</b> `${self.agent.session_pnl:+.2f}`",
+            f"💰 <b>P&L Total:</b> `${(self.agent.session_pnl + unreal):+.2f}`",
             f"{'─'*16}",
-            f"🏆 *Win Rate:* `{wr}%` ({self.agent.stats['wins']}W / {self.agent.stats['losses']}L)",
-            f"🏅 *Melhor trade:* `${self.agent.stats['best']:+.2f}`",
-            f"😢 *Pior trade:* `${self.agent.stats['worst']:+.2f}`",
-            f"📋 *Total trades:* `{total}`",
+            f"🏆 <b>Win Rate:</b> `{wr}%` ({self.agent.stats['wins']}W / {self.agent.stats['losses']}L)",
+            f"🏅 <b>Melhor trade:</b> `${self.agent.stats['best']:+.2f}`",
+            f"😢 <b>Pior trade:</b> `${self.agent.stats['worst']:+.2f}`",
+            f"📋 <b>Total trades:</b> `{total}`",
         ]
         return "\n".join(lines)
 
@@ -447,9 +447,9 @@ class TelegramBot:
             em = "🟢" if pnl_usd >= 0 else "🔴"
             lines.append(
                 f"\n{em} *{sym}* | {'LONG' if il else 'SHORT'} {pos['leverage']}x\n"
-                f"  Entrada: `${pos['entry']:,.4f}` → `${cur:,.4f}`\n"
-                f"  P&L: `{pnl_lev:+.2f}%` (`${pnl_usd:+.2f}`)\n"
-                f"  SL: `${pos['stop_loss']:,.4f}` | TP1: `${pos['tp1']:,.4f}`\n"
+                f"  Entrada: `${pos['entry']:,.4f}<code> → </code>${cur:,.4f}`\n"
+                f"  P&L: `{pnl_lev:+.2f}%<code> (</code>${pnl_usd:+.2f}`)\n"
+                f"  SL: `${pos['stop_loss']:,.4f}<code> | TP1: </code>${pos['tp1']:,.4f}`\n"
                 f"  Aberta: `{pos['opened_at'][:16].replace('T',' ')}`"
             )
         return "\n".join(lines)
@@ -468,13 +468,13 @@ class TelegramBot:
             reason = t.get("exit_reason", "?")
             em     = "✅" if pnl >= 0 else "❌"
             lines.append(
-                f"{em} *{sym}* {dir_} | `${entry:,.4f}` → `${exit_:,.4f}`\n"
+                f"{em} *{sym}* {dir_} | `${entry:,.4f}<code> → </code>${exit_:,.4f}`\n"
                 f"   P&L: `${pnl:+.2f}` | {reason}"
             )
         return "\n".join(lines)
 
     async def _do_analyze(self, update: Update, symbol: str):
-        m = await update.message.reply_text(f"🔍 Analisando *{symbol}*...", parse_mode="Markdown")
+        m = await update.message.reply_text(f"🔍 Analisando *{symbol}*...", parse_mode="HTML")
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None, self.agent.analyze_market, symbol
@@ -498,7 +498,7 @@ class TelegramBot:
                     InlineKeyboardButton(f"⚡ Executar {signal['signal']}", callback_data=f"exec_{symbol}"),
                     InlineKeyboardButton("❌ Ignorar", callback_data="ignorar")
                 ]])
-            await m.edit_text(reply, parse_mode="Markdown", reply_markup=markup)
+            await m.edit_text(reply, parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             await m.edit_text(f"❌ Erro: {e}")
 
@@ -513,7 +513,7 @@ class TelegramBot:
             await self.app.bot.send_message(
                 chat_id=chat_id,
                 text=safe_msg,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception as e:
             try:
