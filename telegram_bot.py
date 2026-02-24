@@ -508,14 +508,23 @@ class TelegramBot:
 
     async def notify(self, chat_id: int, message: str):
         try:
+            # Escapar caracteres problemáticos do Markdown
+            safe_msg = message
             await self.app.bot.send_message(
                 chat_id=chat_id,
-                text=message,
+                text=safe_msg,
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logger.error(f"Notify error: {e}")
+            try:
+                # Tentar sem Markdown se falhar
+                await self.app.bot.send_message(chat_id=chat_id, text=message)
+            except Exception as e2:
+                logger.error(f"Notify error: {e2}")
 
     def run(self):
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(loop)
         logger.info("📱 Telegram polling iniciado")
         self.app.run_polling(drop_pending_updates=True)
