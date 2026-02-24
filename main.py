@@ -82,12 +82,16 @@ CONFIG = {
 # ═════════════════════════════════════════════════════════════════════════════
 TRADER_SYSTEM_PROMPT = """Trader profissional de perpetuals na Hyperliquid. Foco em lucro.
 
-REGRAS:
+REGRAS DE ANÁLISE:
 - Analise Diário(tendência) → 4h(estrutura/níveis) → 1h(entrada)
 - Entre só com ≥3 confluências técnicas: BOS/CHoCH, order block, FVG, RSI divergência, volume, funding
 - RR mínimo 1:2. SL em zona técnica. Alavancagem máxima que o setup suportar
 - LONG em bull market / correções em suporte. SHORT em bear market / rejeição em resistência
 - WAIT se: lateral sem direção, funding extremo contra, sem confluência
+
+FORMATO DA RESPOSTA — dois campos de texto obrigatórios:
+1. "reasoning_tecnico": explicação técnica completa (para traders)
+2. "reasoning_simples": explicação em português simples (para qualquer pessoa entender, use analogias do dia a dia, evite jargões)
 
 RESPONDA APENAS COM O JSON (sem texto antes ou depois):
 ```json
@@ -100,8 +104,9 @@ RESPONDA APENAS COM O JSON (sem texto antes ou depois):
   "take_profit_2": 0.0,
   "leverage": 0,
   "timeframe": "1h",
-  "reasoning": "max 1 frase",
-  "invalidation": "max 1 frase"
+  "reasoning_tecnico": "análise técnica detalhada em 2-3 frases",
+  "reasoning_simples": "explicação simples com analogia do dia a dia em 2-3 frases",
+  "invalidation": "o que cancela o setup em linguagem simples"
 }
 ```
 """
@@ -524,6 +529,32 @@ class HyperTraderAgent:
                 if self.paused:
                     await asyncio.sleep(30)
                     continue
+
+                # Verificar saldo Anthropic a cada 10 ciclos
+                if not hasattr(self, "_balance_check_count"):
+                    self._balance_check_count = 0
+                self._balance_check_count += 1
+                if self._balance_check_count % 10 == 0:
+                    try:
+                        import requests
+                        headers = {
+                            "x-api-key": CONFIG["anthropic_api_key"],
+                            "anthropic-version": "2023-06-01"
+                        }
+                        resp = requests.get(
+                            "https://api.anthropic.com/v1/organizations/billing/credits",
+                            headers=headers, timeout=5
+                        )
+                        if resp.status_code == 200:
+                            credits = resp.json().get("available_credits", 9999) / 100
+                            if credits < 3:
+                                self._notify(
+                                    f"⚠️ <b>ALERTA — Créditos Anthropic baixos!</b>\n"
+                                    f"Saldo restante: <code>${credits:.2f}</code>\n"
+                                    f"Adicione créditos em: console.anthropic.com/settings/billing"
+                                )
+                    except Exception:
+                        pass
 
                 # Stop diário por valor absoluto estimado
                 acc_val = self.hl.get_account_info().get("equity", 10000)
