@@ -64,7 +64,7 @@ CONFIG = {
     "partial_tp_pct":         0.50,    # fechar 50% no TP1
 
     # ── Intervalos ───────────────────────────────────────────────────────
-    "analysis_interval":      900,     # nova rodada a cada 15 min — economiza créditos
+    "analysis_interval":      1800,    # nova rodada a cada 30 min — economiza créditos
     "pnl_update_interval":    120,     # update de P&L no Telegram a cada 2 min
 
     # ── Modo ─────────────────────────────────────────────────────────────
@@ -179,8 +179,8 @@ class HyperTraderAgent:
             msg += f"\n\n```json\n{json.dumps(ctx, indent=2, default=str)}\n```"
         self.history.append({"role": "user", "content": msg})
         resp = self.ai.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,  # haiku é rápido e barato
             system=TRADER_SYSTEM_PROMPT,
             messages=self.history
         )
@@ -490,19 +490,15 @@ class HyperTraderAgent:
     def _notify(self, msg: str):
         if self.telegram_bot and CONFIG["telegram_chat_id"]:
             try:
-                import concurrent.futures
-                def _send():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(
-                            self.telegram_bot.notify(CONFIG["telegram_chat_id"], msg)
-                        )
-                    finally:
-                        loop.close()
-                t = threading.Thread(target=_send, daemon=True)
-                t.start()
-                t.join(timeout=10)
+                loop = asyncio.get_event_loop()
+                if loop and loop.is_running():
+                    asyncio.ensure_future(
+                        self.telegram_bot.notify(CONFIG["telegram_chat_id"], msg)
+                    )
+                else:
+                    loop.run_until_complete(
+                        self.telegram_bot.notify(CONFIG["telegram_chat_id"], msg)
+                    )
             except Exception as e:
                 logger.error(f"Telegram notify error: {e}")
 
@@ -588,23 +584,29 @@ if __name__ == "__main__":
     mode  = sys.argv[1] if len(sys.argv) > 1 else "interactive"
 
     if mode == "auto":
-        if CONFIG["telegram_token"]:
-            from telegram_bot import TelegramBot
-            tg = TelegramBot(agent, CONFIG["telegram_token"])
-            agent.telegram_bot = tg
+        async def main_async():
+            if CONFIG["telegram_token"]:
+                from telegram_bot import TelegramBot
+                tg = TelegramBot(agent, CONFIG["telegram_token"])
+                agent.telegram_bot = tg
+                logger.info("📱 Telegram Bot ativo")
 
-            def run_telegram():
-                import asyncio as _asyncio
-                loop = _asyncio.new_event_loop()
-                _asyncio.set_event_loop(loop)
-                tg.app.run_polling(drop_pending_updates=True)
+                # Inicializar bot
+                await tg.app.initialize()
+                await tg.app.start()
+                await tg.app.updater.start_polling(drop_pending_updates=True)
 
-            tg_thread = threading.Thread(target=run_telegram, daemon=True)
-            tg_thread.start()
-            logger.info("📱 Telegram Bot ativo")
-            import time; time.sleep(3)  # aguarda bot iniciar
+                # Rodar trading loop e bot juntos no mesmo event loop
+                try:
+                    await agent.run_autonomous()
+                finally:
+                    await tg.app.updater.stop()
+                    await tg.app.stop()
+                    await tg.app.shutdown()
+            else:
+                await agent.run_autonomous()
 
-        asyncio.run(agent.run_autonomous())
+        asyncio.run(main_async())
     else:
         print("\n🤖 HyperTrader — Modo Interativo")
         print("Comandos: analisar BTC | posicoes | relatorio | sair\n")
