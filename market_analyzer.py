@@ -67,12 +67,30 @@ class MarketAnalyzer:
         }
     
     def _extract_ohlcv(self, candles: list) -> tuple:
-        """Extrai arrays OHLCV dos candles"""
-        opens = [float(c[1]) for c in candles]
-        highs = [float(c[2]) for c in candles]
-        lows = [float(c[3]) for c in candles]
-        closes = [float(c[4]) for c in candles]
-        volumes = [float(c[5]) for c in candles]
+        """Extrai arrays OHLCV dos candles — compatível com formato Hyperliquid"""
+        opens, highs, lows, closes, volumes = [], [], [], [], []
+        for c in candles:
+            try:
+                if isinstance(c, dict):
+                    o  = float(c.get('o', c.get('open',   0)) or 0)
+                    h  = float(c.get('h', c.get('high',   0)) or 0)
+                    l  = float(c.get('l', c.get('low',    0)) or 0)
+                    cl = float(c.get('c', c.get('close',  0)) or 0)
+                    v  = float(c.get('v', c.get('volume', 0)) or 0)
+                elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                    o, h, l, cl, v = (float(c[0] or 0), float(c[1] or 0),
+                                      float(c[2] or 0), float(c[3] or 0),
+                                      float(c[4] or 0))
+                else:
+                    continue
+                if cl > 0:
+                    opens.append(o)
+                    highs.append(h)
+                    lows.append(l)
+                    closes.append(cl)
+                    volumes.append(v)
+            except Exception:
+                continue
         return opens, highs, lows, closes, volumes
     
     def _calculate_indicators(self, candles: list) -> dict:
