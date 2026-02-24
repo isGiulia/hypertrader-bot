@@ -36,7 +36,7 @@ class RiskManager:
             return {"approved": False, "reason": "R:R abaixo do mínimo (1:2)"}
         
         # 5. Verificar alavancagem
-        leverage = signal.get("leverage", self.config["default_leverage"])
+        leverage = signal.get("leverage", self.config.get("default_leverage", self.config.get("leverage_fallback", 10)))
         if leverage > self.config["max_leverage"]:
             signal["leverage"] = self.config["max_leverage"]
             logger.warning(f"Alavancagem reduzida para máximo: {self.config['max_leverage']}x")

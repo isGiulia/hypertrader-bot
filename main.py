@@ -53,10 +53,9 @@ CONFIG = {
     # ── Trading ──────────────────────────────────────────────────────────
     "max_positions":          5,
     "risk_per_trade":         0.025,   # 2.5% do capital por trade
-    # Alavancagem: o bot busca automaticamente o máximo permitido por moeda via API.
-    # O valor abaixo é apenas um fallback caso a API falhe.
+    "default_leverage":       10,      # fallback se API não retornar
     "leverage_fallback":      20,
-    "min_confidence":         68,      # confiança mínima para entrar
+    "min_confidence":         75,      # confiança mínima — só trades de alta qualidade
 
     # ── Risco ────────────────────────────────────────────────────────────
     "daily_loss_limit":       0.06,    # 6% = stop diário (em % do capital)
@@ -65,8 +64,8 @@ CONFIG = {
     "partial_tp_pct":         0.50,    # fechar 50% no TP1
 
     # ── Intervalos ───────────────────────────────────────────────────────
-    "analysis_interval":      180,     # nova rodada de análise a cada 3 min
-    "pnl_update_interval":    60,      # update de P&L no Telegram a cada 60s
+    "analysis_interval":      900,     # nova rodada a cada 15 min — economiza créditos
+    "pnl_update_interval":    120,     # update de P&L no Telegram a cada 2 min
 
     # ── Modo ─────────────────────────────────────────────────────────────
     "use_testnet":            True,    # ← False para mainnet
@@ -81,50 +80,28 @@ CONFIG = {
 # ═════════════════════════════════════════════════════════════════════════════
 #  SYSTEM PROMPT — trader agressivo focado em resultados
 # ═════════════════════════════════════════════════════════════════════════════
-TRADER_SYSTEM_PROMPT = """Você é um trader quantitativo profissional de elite, operando futuros perpétuos de criptomoedas na Hyperliquid.
+TRADER_SYSTEM_PROMPT = """Trader profissional de perpetuals na Hyperliquid. Foco em lucro.
 
-MISSÃO: Gerar lucro consistente. Seja direto, decisivo e baseado em dados. Não hesite.
+REGRAS:
+- Analise Diário(tendência) → 4h(estrutura/níveis) → 1h(entrada)
+- Entre só com ≥3 confluências técnicas: BOS/CHoCH, order block, FVG, RSI divergência, volume, funding
+- RR mínimo 1:2. SL em zona técnica. Alavancagem máxima que o setup suportar
+- LONG em bull market / correções em suporte. SHORT em bear market / rejeição em resistência
+- WAIT se: lateral sem direção, funding extremo contra, sem confluência
 
-ALAVANCAGEM:
-- Para cada ativo, a plataforma fornece o maxLeverage real (ex: BTC=50x, ETH=50x, DOGE=25x, WIF=20x).
-- Sempre sugira a alavancagem máxima que o contexto de risco permitir, priorizando o limite máximo da plataforma.
-- Em tendências fortes com confluência alta (>80%): use o máximo disponível.
-- Em setups menos claros (68-79%): use entre 50-80% do máximo disponível.
-- NUNCA sugira alavancagem abaixo de 5x. O foco é resultado.
-
-CRITÉRIOS PARA ENTRAR:
-1. Confluência de pelo menos 3 fatores técnicos
-2. RR mínimo de 1:2 (preferencialmente 1:3)
-3. Volume confirmando a direção
-4. Funding rate não extremamente contra a posição
-5. Stop loss em zona técnica sólida
-
-FRAMEWORKS:
-- Price Action: BOS/CHoCH, order blocks, FVG, swing structures
-- ICT/SMC: inducement, liquidez, POI, mitigation blocks
-- Wyckoff: acumulação/distribuição, springs, upthrusts
-- Indicadores: RSI divergências, MACD, Volume Delta, ATR, VWAP
-- Derivativos: funding rate extremos, open interest, long/short ratio
-
-QUANDO DIZER WAIT:
-- Mercado lateral sem direção
-- Sem confluência técnica suficiente
-- Funding rate extremo contra a direção
-- Próximo de evento macro
-
-FORMATO OBRIGATÓRIO — inclua SEMPRE ao final da análise (JSON válido, sem comentários):
+RESPONDA APENAS COM O JSON (sem texto antes ou depois):
 ```json
 {
-  "signal": "LONG",
-  "confidence": 75,
+  "signal": "LONG ou SHORT ou WAIT",
+  "confidence": 0,
   "entry_price": 0.0,
   "stop_loss": 0.0,
   "take_profit_1": 0.0,
   "take_profit_2": 0.0,
-  "leverage": 7,
+  "leverage": 0,
   "timeframe": "1h",
-  "reasoning": "racional em 1-2 frases",
-  "invalidation": "o que cancela o setup"
+  "reasoning": "max 1 frase",
+  "invalidation": "max 1 frase"
 }
 ```
 """
@@ -157,6 +134,9 @@ class HyperTraderAgent:
         # Carregar alavancagem máxima real de cada ativo via API
         self.asset_leverage_map: dict = {}
         self._load_leverage_limits()
+        # Cache de análise 4h — só recalcula quando timeframe muda
+        self._4h_cache: dict = {}
+        self._4h_cache_time: dict = {}
         logger.info("🤖 HyperTrader AI iniciado")
         logger.info(f"Símbolos: {CONFIG['symbols']}")
 
@@ -224,17 +204,29 @@ class HyperTraderAgent:
 
     def analyze_market(self, symbol: str) -> dict:
         logger.info(f"🔍 {symbol}...")
-        data   = self.analyzer.get_full_analysis(symbol)
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).timestamp()
+        # Cache 4h — só busca dados completos a cada 4 horas por símbolo
+        cache_age = now - self._4h_cache_time.get(symbol, 0)
+        if cache_age > 14400:  # 4 horas
+            data = self.analyzer.get_full_analysis(symbol)
+            # Guardar só o essencial no cache (economiza memória)
+            self._4h_cache[symbol] = {
+                "market_structure": data.get("market_structure", {}),
+                "funding": data.get("funding", {}),
+                "indicators": {"4h": data.get("indicators", {}).get("4h", {})},
+            }
+            self._4h_cache_time[symbol] = now
+        else:
+            # Busca apenas dados de curto prazo (1h/15m) — muito mais barato
+            data = self.analyzer.get_full_analysis(symbol)
+            # Injeta cache do 4h
+            data["market_structure"] = self._4h_cache.get(symbol, {}).get("market_structure", {})
         platform_max = self.get_symbol_max_leverage(symbol)
         prompt = (
-            f"Analise {symbol}/USDC perpétuo na Hyperliquid AGORA.\n"
-            f"Multi-timeframe (4h tendência, 1h estrutura, 15m entrada).\n"
-            f"Avalie: estrutura, zonas, momentum (RSI/MACD/volume), "
-            f"funding rate, open interest.\n"
-            f"⚠️ ALAVANCAGEM MÁXIMA PERMITIDA PELA PLATAFORMA PARA {symbol}: {platform_max}x\n"
-            f"Sugira sempre o máximo que o setup suportar, até {platform_max}x.\n"
-            f"Se setup válido com confluência ≥3 fatores: sinalize LONG ou SHORT.\n"
-            f"Sem confluência: WAIT. Foco em resultado."
+            f"{symbol} perp Hyperliquid. Max leverage: {platform_max}x.\n"
+            f"Analise D1(tendência)+4h(estrutura)+1h(entrada). "
+            f"Dados abaixo. Retorne APENAS o JSON."
         )
         analysis = self._chat(prompt, data)
         signal   = self._extract_signal(analysis)
