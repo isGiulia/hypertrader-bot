@@ -305,6 +305,8 @@ class MarketAnalyzer:
     
     def _analyze_orderbook(self, book: dict) -> dict:
         """Analisa o livro de ordens para detectar liquidez"""
+        if not book or not isinstance(book, dict):
+            return {}
         levels = book.get("levels", [[], []])
         if not levels or len(levels) < 2:
             return {}

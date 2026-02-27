@@ -109,6 +109,7 @@ class HyperTraderAgent:
         self._4h_cache: dict = {}
         self._4h_cache_time: dict = {}
         self._balance_check_count = 0
+        self._last_weak_signal: dict = {}  # cooldown para sinais fracos por simbolo
         logger.info("HyperTrader AI iniciado")
         logger.info(f"Simbolos: {CONFIG['symbols']}")
 
@@ -535,13 +536,18 @@ class HyperTraderAgent:
                             if sig in ("LONG", "SHORT") and conf >= CONFIG["min_confidence"]:
                                 self.execute_trade(sym, s)
                             elif sig in ("LONG", "SHORT") and conf < CONFIG["min_confidence"]:
-                                dir_str = "COMPRA" if sig == "LONG" else "VENDA"
-                                self._notify(
-                                    "🟡 <b>" + sym + " — SINAL FRACO</b>\n"
-                                    + dir_str + " com <code>" + str(conf) + "%</code>"
-                                    + " de confianca (minimo: <code>"
-                                    + str(CONFIG["min_confidence"]) + "%</code>)"
-                                )
+                                # Cooldown de 60 min por simbolo para nao spammar
+                                now_ts = datetime.now(timezone.utc).timestamp()
+                                last   = self._last_weak_signal.get(sym, 0)
+                                if now_ts - last > 3600:
+                                    dir_str = "COMPRA" if sig == "LONG" else "VENDA"
+                                    self._notify(
+                                        "🟡 <b>" + sym + " — SINAL FRACO</b>\n"
+                                        + dir_str + " com <code>" + str(conf) + "%</code>"
+                                        + " de confianca (minimo: <code>"
+                                        + str(CONFIG["min_confidence"]) + "%</code>)"
+                                    )
+                                    self._last_weak_signal[sym] = now_ts
                             # WAIT — nao notifica para nao spammar
                         await asyncio.sleep(8)
 
