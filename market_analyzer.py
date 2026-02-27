@@ -4,6 +4,8 @@ Análise técnica completa com múltiplos indicadores e frameworks
 """
 
 import math
+import urllib.request
+import json as _json
 from typing import Optional
 
 
@@ -13,51 +15,109 @@ class MarketAnalyzer:
     def __init__(self, hl_client):
         self.hl = hl_client
     
+    def _get_macro_context(self) -> dict:
+        """Busca Fear & Greed Index e contexto macro do mercado"""
+        result = {
+            "fear_greed_index": None,
+            "fear_greed_label": "DESCONHECIDO",
+            "fear_greed_warning": "",
+            "data_source": "alternative.me"
+        }
+        try:
+            url = "https://api.alternative.me/fng/?limit=1&format=json"
+            req = urllib.request.urlopen(url, timeout=5)
+            data = _json.loads(req.read().decode())
+            fng  = data["data"][0]
+            val  = int(fng["value"])
+            lbl  = fng["value_classification"]
+            result["fear_greed_index"] = val
+            result["fear_greed_label"] = lbl
+
+            # Alerta de contexto para o modelo
+            if val <= 20:
+                result["fear_greed_warning"] = (
+                    "ATENCAO: Fear & Greed em MEDO EXTREMO (" + str(val) + "). "
+                    "Sinais de COMPRA exigem confluencia MUITO FORTE — minimo 5 confirmacoes tecnicas. "
+                    "Probabilidade alta de continuacao da queda. Seja muito conservador."
+                )
+            elif val <= 40:
+                result["fear_greed_warning"] = (
+                    "Mercado com MEDO (" + str(val) + "). "
+                    "Entradas de compra requerem confirmacao extra de volume e reversao."
+                )
+            elif val >= 80:
+                result["fear_greed_warning"] = (
+                    "ATENCAO: Fear & Greed em GANANCIA EXTREMA (" + str(val) + "). "
+                    "Sinais de VENDA tem alta probabilidade. Compras tem risco elevado de topo."
+                )
+            elif val >= 60:
+                result["fear_greed_warning"] = (
+                    "Mercado com GANANCIA (" + str(val) + "). "
+                    "Cuidado com entradas de compra — mercado pode estar sobrecomprado."
+                )
+        except Exception as e:
+            result["fear_greed_warning"] = "ERRO AO BUSCAR FEAR & GREED: " + str(e) + ". Seja conservador."
+        return result
+
     def get_full_analysis(self, symbol: str) -> dict:
         """Coleta e processa todos os dados de mercado"""
-        
+        errors = []
+
         # Dados em múltiplos timeframes
-        candles_1h = self.hl.get_candles(symbol, "1h", 100)
-        candles_4h = self.hl.get_candles(symbol, "4h", 50)
+        candles_1h  = self.hl.get_candles(symbol, "1h", 100)
+        candles_4h  = self.hl.get_candles(symbol, "4h", 50)
         candles_15m = self.hl.get_candles(symbol, "15m", 100)
-        
+
+        if not candles_1h:  errors.append("candles_1h indisponivel da API Hyperliquid")
+        if not candles_4h:  errors.append("candles_4h indisponivel da API Hyperliquid")
+        if not candles_15m: errors.append("candles_15m indisponivel da API Hyperliquid")
+
         # Dados de mercado
-        funding = self.hl.get_funding_rate(symbol)
-        book = self.hl.get_l2_book(symbol)
-        trades = self.hl.get_recent_trades(symbol)
+        funding    = self.hl.get_funding_rate(symbol)
+        book       = self.hl.get_l2_book(symbol)
+        trades     = self.hl.get_recent_trades(symbol)
         mark_price = self.hl.get_mark_price(symbol)
-        
+
+        if not book:    errors.append("orderbook indisponivel da API Hyperliquid — dado real existe mas API falhou")
+        if not funding: errors.append("funding rate indisponivel")
+        if mark_price == 0: errors.append("mark_price retornou 0 — possivel erro de API")
+
         # Calcular indicadores
-        ta_1h = self._calculate_indicators(candles_1h) if candles_1h else {}
-        ta_4h = self._calculate_indicators(candles_4h) if candles_4h else {}
+        ta_1h  = self._calculate_indicators(candles_1h)  if candles_1h  else {}
+        ta_4h  = self._calculate_indicators(candles_4h)  if candles_4h  else {}
         ta_15m = self._calculate_indicators(candles_15m) if candles_15m else {}
-        
-        # Análise de order book
+
+        # Analise de order book
         book_analysis = self._analyze_orderbook(book)
-        
-        # Análise de volume
+
+        # Analise de volume
         volume_profile = self._analyze_volume(candles_1h) if candles_1h else {}
-        
-        # Detectar padrões
+
+        # Detectar padroes
         patterns = self._detect_patterns(candles_1h) if candles_1h else {}
-        
+
         # Market structure
         structure = self._analyze_market_structure(candles_4h) if candles_4h else {}
-        
+
+        # Macro context — Fear & Greed
+        macro = self._get_macro_context()
+
         return {
             "symbol": symbol,
             "mark_price": mark_price,
+            "data_errors": errors,  # transparencia: erros tecnicos explicados
             "funding": {
-                "rate": funding.get("funding_rate", 0),
-                "annual_rate": funding.get("funding_rate", 0) * 3 * 365 * 100,
-                "open_interest": funding.get("open_interest", 0),
-                "sentiment": "bearish_bias" if funding.get("funding_rate", 0) > 0.0005 else 
-                            "bullish_bias" if funding.get("funding_rate", 0) < -0.0005 else "neutral"
+                "rate": funding.get("funding_rate", 0) if funding else 0,
+                "annual_rate": funding.get("funding_rate", 0) * 3 * 365 * 100 if funding else 0,
+                "open_interest": funding.get("open_interest", 0) if funding else 0,
+                "sentiment": "bearish_bias" if (funding or {}).get("funding_rate", 0) > 0.0005 else
+                             "bullish_bias" if (funding or {}).get("funding_rate", 0) < -0.0005 else "neutral"
             },
+            "macro_sentiment": macro,
             "indicators": {
                 "15m": ta_15m,
-                "1h": ta_1h,
-                "4h": ta_4h
+                "1h":  ta_1h,
+                "4h":  ta_4h
             },
             "orderbook": book_analysis,
             "volume": volume_profile,
