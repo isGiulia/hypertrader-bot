@@ -524,37 +524,81 @@ class HyperTraderAgent:
                     self.notify_pnl_update()
                     pnl_tick = 0
 
-                if len(self.active_positions) < CONFIG["max_positions"]:
-                    for sym in CONFIG["symbols"]:
-                        if sym in self.active_positions or self.paused:
-                            continue
-                        r = self.analyze_market(sym)
-                        s = r.get("signal")
-                        if s:
-                            sig  = s.get("signal", "WAIT")
-                            conf = s.get("confidence", 0)
-                            if sig in ("LONG", "SHORT") and conf >= CONFIG["min_confidence"]:
-                                self.execute_trade(sym, s)
-                            elif sig in ("LONG", "SHORT") and conf < CONFIG["min_confidence"]:
-                                # Cooldown de 60 min por simbolo para nao spammar
-                                now_ts = datetime.now(timezone.utc).timestamp()
-                                last   = self._last_weak_signal.get(sym, 0)
-                                if now_ts - last > 3600:
-                                    dir_str = "COMPRA" if sig == "LONG" else "VENDA"
-                                    self._notify(
-                                        "🟡 <b>" + sym + " — SINAL FRACO</b>\n"
-                                        + dir_str + " com <code>" + str(conf) + "%</code>"
-                                        + " de confianca (minimo: <code>"
-                                        + str(CONFIG["min_confidence"]) + "%</code>)"
-                                    )
-                                    self._last_weak_signal[sym] = now_ts
-                            # WAIT — nao notifica para nao spammar
-                        await asyncio.sleep(8)
+                # ── Analisar todas as moedas e notificar CADA resultado ──────────
+                resultados = []
+                entrou_trade = False
+
+                for sym in CONFIG["symbols"]:
+                    if self.paused:
+                        break
+                    if sym in self.active_positions:
+                        # Ja tem posicao aberta — mostra status
+                        pos = self.active_positions[sym]
+                        cur = self.hl.get_mark_price(sym)
+                        il  = pos["direction"] == "LONG"
+                        pp  = ((cur - pos["entry"]) / pos["entry"] * 100) if il else ((pos["entry"] - cur) / pos["entry"] * 100)
+                        pl  = pp * pos["leverage"]
+                        pu  = (pp / 100) * pos["equity_open"]
+                        em  = "🟢" if pu >= 0 else "🔴"
+                        resultados.append(em + " <b>" + sym + "</b> em posicao aberta | " + f"P&amp;L: <code>{pl:+.2f}%</code>")
+                        continue
+
+                    r    = self.analyze_market(sym)
+                    s    = r.get("signal")
+                    sig  = s.get("signal", "WAIT") if s else "WAIT"
+                    conf = s.get("confidence", 0) if s else 0
+                    momento = s.get("momento", "") if s else ""
+
+                    if sig == "LONG":
+                        em = "🟢"
+                        dir_pt = "COMPRAR"
+                    elif sig == "SHORT":
+                        em = "🔴"
+                        dir_pt = "VENDER"
+                    else:
+                        em = "⚪"
+                        dir_pt = "ESPERAR"
+
+                    linha = em + " <b>" + sym + "</b> — " + dir_pt + " <code>" + str(conf) + "%</code>"
+                    if momento:
+                        linha += "\n    <i>" + str(momento)[:80] + "</i>"
+                    resultados.append(linha)
+
+                    if sig in ("LONG", "SHORT") and conf >= CONFIG["min_confidence"]:
+                        self.execute_trade(sym, s)
+                        entrou_trade = True
+                    elif sig in ("LONG", "SHORT") and conf < CONFIG["min_confidence"]:
+                        now_ts = datetime.now(timezone.utc).timestamp()
+                        last   = self._last_weak_signal.get(sym, 0)
+                        if now_ts - last > 3600:
+                            self._last_weak_signal[sym] = now_ts
+
+                    await asyncio.sleep(8)
+
+                # ── Resumo do ciclo no Telegram ────────────────────────────────────
+                total       = self.stats["total"]
+                wr          = round(self.stats["wins"] / total * 100, 1) if total > 0 else 0
+                proxima     = datetime.now(timezone.utc).timestamp() + CONFIG["analysis_interval"]
+                proxima_str = datetime.fromtimestamp(proxima, tz=timezone.utc).strftime("%H:%M UTC")
+                hora_atual  = datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+                resumo = (
+                    "🔄 <b>Ciclo de Analise Completo</b>\n"
+                    "────────────────────\n"
+                    + "\n".join(resultados) + "\n\n"
+                    "────────────────────\n"
+                    + "📊 Posicoes: <code>" + str(len(self.active_positions)) + "/" + str(CONFIG["max_positions"]) + "</code>\n"
+                    + "💵 P&amp;L sessao: <code>$" + f"{self.session_pnl:+.2f}" + "</code>\n"
+                    + "🏆 Win Rate: <code>" + str(wr) + "%</code> (" + str(self.stats["wins"]) + "W/" + str(self.stats["losses"]) + "L)\n"
+                    + "⏱ Proxima analise: <code>" + proxima_str + "</code>"
+                )
+                self._notify(resumo)
 
                 logger.info(
-                    f"Aguardando {CONFIG['analysis_interval']}s | "
+                    f"Ciclo completo | "
                     f"Posicoes: {len(self.active_positions)}/{CONFIG['max_positions']} | "
-                    f"P&L: ${self.session_pnl:+.2f}"
+                    f"P&L: ${self.session_pnl:+.2f} | "
+                    f"Proxima: {proxima_str}"
                 )
                 await asyncio.sleep(CONFIG["analysis_interval"])
 
