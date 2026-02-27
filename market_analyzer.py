@@ -13,18 +13,27 @@ class MarketAnalyzer:
     """Analisador técnico completo de mercado"""
     
     def __init__(self, hl_client):
-        self.hl = hl_client
+        self.hl              = hl_client
+        self._macro_cache      = None
+        self._macro_cache_time = 0  # cache de 1h — F&G nao muda a cada analise
     
     def _get_macro_context(self) -> dict:
-        """Busca Fear & Greed Index + BTC Dominance e contexto macro completo"""
+        """Busca Fear & Greed Index + BTC Dominance — cache de 1h para economizar APIs"""
+        import time as _time
+        now = _time.time()
+
+        # Retorna cache se ainda valido (1 hora)
+        if self._macro_cache and (now - self._macro_cache_time) < 3600:
+            return self._macro_cache
+
         result = {
-            "fear_greed_index":   None,
-            "fear_greed_label":   "DESCONHECIDO",
-            "fear_greed_warning": "",
-            "btc_dominance":      None,
-            "btc_dominance_trend": "desconhecido",
+            "fear_greed_index":      None,
+            "fear_greed_label":      "DESCONHECIDO",
+            "fear_greed_warning":    "",
+            "btc_dominance":         None,
+            "btc_dominance_trend":   "desconhecido",
             "btc_dominance_warning": "",
-            "data_source": "alternative.me + coingecko"
+            "data_source":           "alternative.me + coingecko"
         }
 
         # ── Fear & Greed ──────────────────────────────────────────────────
@@ -96,6 +105,9 @@ class MarketAnalyzer:
         except Exception as e:
             result["btc_dominance_warning"] = "ERRO BTC DOMINANCE: " + str(e) + ". Assuma dominancia alta — seja conservador em altcoins."
 
+        # Salvar no cache
+        self._macro_cache      = result
+        self._macro_cache_time = _time.time()
         return result
 
     def get_full_analysis(self, symbol: str) -> dict:

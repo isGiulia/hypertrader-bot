@@ -39,15 +39,16 @@ CONFIG = {
     "symbols":            ["BTC", "ETH", "SOL", "AVAX", "PEPE"],
     "max_positions":      5,
     "risk_per_trade":     0.025,
-    "default_leverage":   10,
-    "leverage_fallback":  20,
-    "max_leverage":       50,
+    "default_leverage":   5,
+    "leverage_fallback":  10,
+    "max_leverage":       10,    # SEGURANCA: nunca mais que 10x para comecar
     "min_confidence":     75,
+    "max_trades_day":     3,     # maximo de trades novos por dia
     "daily_loss_limit":   0.06,
     "take_profit_ratio":  2.0,
     "trailing_stop":      True,
     "partial_tp_pct":     0.50,
-    "analysis_interval":  900,
+    "analysis_interval":  1800,  # 30min — economiza creditos. Mude para 900 se quiser 15min
     "pnl_update_interval":120,
     "use_testnet":        False,
     "dry_run":            True,
@@ -114,6 +115,7 @@ class HyperTraderAgent:
         self._last_weak_signal: dict  = {}
         self._balance_check_count     = 0
         self._current_day             = datetime.now(timezone.utc).date()
+        self.daily_trades_count       = 0  # limite de trades por dia
 
         # [1.4] Carregar estado persistido
         self._load_state()
@@ -129,12 +131,13 @@ class HyperTraderAgent:
         """Salva estado em state.json — chamado a cada abertura/fechamento de posicao"""
         try:
             state = {
-                "active_positions": self.active_positions,
-                "trade_history":    self.trade_history[-100:],
-                "stats":            self.stats,
-                "session_pnl":      self.session_pnl,
-                "daily_pnl":        self.daily_pnl,
-                "saved_at":         datetime.now(timezone.utc).isoformat()
+                "active_positions":  self.active_positions,
+                "trade_history":     self.trade_history[-100:],
+                "stats":             self.stats,
+                "session_pnl":       self.session_pnl,
+                "daily_pnl":         self.daily_pnl,
+                "daily_trades_count": self.daily_trades_count,
+                "saved_at":          datetime.now(timezone.utc).isoformat()
             }
             tmp = STATE_FILE + ".tmp"
             with open(tmp, "w") as f:
@@ -150,13 +153,14 @@ class HyperTraderAgent:
         try:
             with open(STATE_FILE) as f:
                 state = json.load(f)
-            self.active_positions = state.get("active_positions", {})
-            self.trade_history    = state.get("trade_history", [])
-            self.stats            = state.get("stats", self.stats)
-            self.session_pnl      = state.get("session_pnl", 0.0)
-            self.daily_pnl        = state.get("daily_pnl", 0.0)
+            self.active_positions    = state.get("active_positions", {})
+            self.trade_history       = state.get("trade_history", [])
+            self.stats               = state.get("stats", self.stats)
+            self.session_pnl         = state.get("session_pnl", 0.0)
+            self.daily_pnl           = state.get("daily_pnl", 0.0)
+            self.daily_trades_count  = state.get("daily_trades_count", 0)
             count = len(self.active_positions)
-            logger.info(f"Estado carregado: {count} posicoes abertas, P&L=${self.session_pnl:+.2f}")
+            logger.info(f"Estado carregado: {count} posicoes abertas, P&L=${self.session_pnl:+.2f}, trades hoje={self.daily_trades_count}")
             if count > 0:
                 logger.warning(f"Posicoes restauradas: {list(self.active_positions.keys())}")
         except Exception as e:
@@ -194,11 +198,17 @@ class HyperTraderAgent:
         hist = self.history.setdefault(symbol, [])
         hist.append({"role": "user", "content": msg})
 
-        # [2.4] Modelo sonnet para melhor qualidade de raciocinio
+        # Haiku para analise (20x mais barato) — suficiente para JSON estruturado
+        # Sonnet so para relatorios e chat livre (nao tem custo repetitivo)
+        use_sonnet = symbol in ("_report", "_chat")
         resp = self.ai.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-6" if use_sonnet else "claude-haiku-4-5-20251001",
             max_tokens=1024,
-            system=TRADER_SYSTEM_PROMPT,
+            system=[{
+                "type": "text",
+                "text": TRADER_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"}  # cache do system prompt
+            }],
             messages=hist
         )
         answer = resp.content[0].text
@@ -292,6 +302,13 @@ class HyperTraderAgent:
         if not signal or signal.get("signal") == "WAIT":
             return {"status": "skipped"}
 
+        # ── Limite de trades por dia ──────────────────────────────────────────
+        max_td = CONFIG.get("max_trades_day", 3)
+        if self.daily_trades_count >= max_td:
+            msg = f"Limite de {max_td} trades/dia atingido. Aguardando amanha."
+            logger.info(f"Bloqueado [{symbol}]: {msg}")
+            return {"status": "blocked", "reason": msg}
+
         direction    = signal["signal"]
         entry        = float(signal.get("entry_price", 0))
         sl           = float(signal.get("stop_loss", 0))
@@ -299,7 +316,10 @@ class HyperTraderAgent:
         tp2          = float(signal.get("take_profit_2", 0))
         confidence   = signal.get("confidence", 0)
         platform_max = self.get_symbol_max_leverage(symbol)
-        leverage     = min(int(signal.get("leverage", platform_max)), platform_max)
+        # SEGURANCA: cap duro em max_leverage do CONFIG (10x por padrao)
+        leverage     = min(int(signal.get("leverage", CONFIG["default_leverage"])),
+                           CONFIG["max_leverage"],
+                           platform_max)
         simple       = signal.get("reasoning_simples", signal.get("reasoning", ""))
         ganho        = signal.get("ganho_maximo", "")
         perda        = signal.get("perda_maxima", "")
@@ -321,17 +341,18 @@ class HyperTraderAgent:
         rr_ratio   = round(reward_usd / risk_usd, 2) if risk_usd > 0 else 0
 
         pos = {
-            "direction":   direction,
-            "entry":       entry,
-            "stop_loss":   sl,
-            "tp1":         tp1,
-            "tp2":         tp2,
-            "size":        size,
-            "leverage":    leverage,
-            "equity_open": equity,
-            "opened_at":   datetime.now(timezone.utc).isoformat(),
-            "peak_pnl":    0.0,
-            "tp1_hit":     False,
+            "direction":    direction,
+            "entry":        entry,
+            "stop_loss":    sl,
+            "tp1":          tp1,
+            "tp2":          tp2,
+            "size":         size,
+            "leverage":     leverage,
+            "equity_open":  equity,
+            "opened_at":    datetime.now(timezone.utc).isoformat(),
+            "peak_pnl":     0.0,
+            "tp1_hit":      False,
+            "entry_order_id": None,
             "tp1_order_id": None,
             "tp2_order_id": None,
             "sl_order_id":  None,
@@ -341,45 +362,86 @@ class HyperTraderAgent:
 
         if CONFIG["dry_run"]:
             self.active_positions[symbol] = pos
-            self.stats["total"] += 1
+            self.stats["total"]          += 1
+            self.daily_trades_count      += 1
         else:
             try:
                 # [1.3] is_cross=False — sempre isolated margin
                 self.hl.set_leverage(symbol, leverage, is_cross=False)
 
-                # Ordem de entrada
+                # ── Ordem de ENTRADA ──────────────────────────────────────────
                 entry_result = self.hl.place_order(
                     symbol=symbol, is_buy=is_buy, size=size,
                     price=entry, order_type="limit"
                 )
-                pos["entry_order_id"] = entry_result.get("order_id")
+                if entry_result.get("status") != "ok":
+                    logger.error(f"Ordem de entrada REJEITADA [{symbol}]: {entry_result}")
+                    self._notify(
+                        "⚠️ <b>ORDEM REJEITADA — " + symbol + "</b>\n"
+                        "A entrada NAO foi executada.\n"
+                        "SL e TP NAO foram colocados.\n"
+                        "Erro: <code>" + str(entry_result.get("raw", ""))[:100] + "</code>"
+                    )
+                    return {"status": "rejected", "reason": str(entry_result)}
 
-                # [2.2] Ordens de SL, TP1 e TP2 na exchange imediatamente
-                sl_result = self.hl.place_order(
-                    symbol=symbol, is_buy=not is_buy, size=size,
-                    price=sl, order_type="stop", reduce_only=True
-                )
-                pos["sl_order_id"] = sl_result.get("order_id")
+                entry_oid = entry_result.get("order_id")
+                pos["entry_order_id"] = entry_oid
 
-                tp1_size   = size * CONFIG["partial_tp_pct"]
-                tp1_result = self.hl.place_order(
-                    symbol=symbol, is_buy=not is_buy, size=tp1_size,
-                    price=tp1, order_type="limit", reduce_only=True
-                )
-                pos["tp1_order_id"] = tp1_result.get("order_id")
+                # ── Verificar se a ordem foi PREENCHIDA antes de colocar SL/TP ──
+                # Aguarda 3 segundos para dar tempo de preencher
+                import time as _time
+                _time.sleep(3)
+                open_orders = self.hl.get_open_orders()
+                order_ids_open = [str(o.get("oid", "")) for o in open_orders]
+                entry_filled = str(entry_oid) not in order_ids_open
 
-                tp2_size   = size * (1 - CONFIG["partial_tp_pct"])
-                tp2_result = self.hl.place_order(
-                    symbol=symbol, is_buy=not is_buy, size=tp2_size,
-                    price=tp2, order_type="limit", reduce_only=True
-                )
-                pos["tp2_order_id"] = tp2_result.get("order_id")
+                if not entry_filled:
+                    # Ordem ainda aberta (limit nao preenchida) — nao coloca SL/TP
+                    # Mas registra como posicao pendente para monitorar
+                    pos["status"]    = "pending_fill"
+                    pos["tp1_order_id"] = None
+                    pos["sl_order_id"]  = None
+                    self.active_positions[symbol] = pos
+                    self.stats["total"]          += 1
+                    self.daily_trades_count      += 1
+                    logger.warning(f"{symbol}: ordem limit nao preenchida ainda — aguardando fill")
+                    self._notify(
+                        "⏳ <b>ORDEM AGUARDANDO FILL — " + symbol + "</b>\n"
+                        "Limite colocada em <code>$" + f"{entry:,.4f}" + "</code>\n"
+                        "SL/TP serao colocados assim que preencher.\n"
+                        "Order ID: <code>" + str(entry_oid) + "</code>"
+                    )
+                else:
+                    # ── Ordem preenchida: colocar SL, TP1 e TP2 ────────────────
+                    sl_result = self.hl.place_order(
+                        symbol=symbol, is_buy=not is_buy, size=size,
+                        price=sl, order_type="stop", reduce_only=True
+                    )
+                    pos["sl_order_id"] = sl_result.get("order_id")
 
-                self.active_positions[symbol] = pos
-                self.stats["total"] += 1
-                logger.info(f"{direction} {symbol} @ ${entry:,.4f} | SL={sl_result.get('order_id')} TP1={tp1_result.get('order_id')} TP2={tp2_result.get('order_id')}")
+                    tp1_size   = size * CONFIG["partial_tp_pct"]
+                    tp1_result = self.hl.place_order(
+                        symbol=symbol, is_buy=not is_buy, size=tp1_size,
+                        price=tp1, order_type="limit", reduce_only=True
+                    )
+                    pos["tp1_order_id"] = tp1_result.get("order_id")
+
+                    tp2_size   = size * (1 - CONFIG["partial_tp_pct"])
+                    tp2_result = self.hl.place_order(
+                        symbol=symbol, is_buy=not is_buy, size=tp2_size,
+                        price=tp2, order_type="limit", reduce_only=True
+                    )
+                    pos["tp2_order_id"] = tp2_result.get("order_id")
+                    pos["status"]       = "open"
+
+                    self.active_positions[symbol] = pos
+                    self.stats["total"]          += 1
+                    self.daily_trades_count      += 1
+                    logger.info(f"{direction} {symbol} @ ${entry:,.4f} | SL={pos['sl_order_id']} TP1={pos['tp1_order_id']} TP2={pos['tp2_order_id']}")
+
             except Exception as e:
                 logger.error(f"Erro execucao {symbol}: {e}")
+                self._notify("🚨 <b>ERRO CRITICO na execucao de " + symbol + "</b>\n<code>" + str(e)[:200] + "</code>")
                 return {"status": "error", "error": str(e)}
 
         # [1.4] Salvar estado apos abrir posicao
@@ -416,10 +478,63 @@ class HyperTraderAgent:
             current = self.hl.get_mark_price(symbol)
             if current == 0:
                 continue
+
+            # ── Verificar ordens pendentes de fill ───────────────────────────
+            if pos.get("status") == "pending_fill" and not CONFIG["dry_run"]:
+                open_orders = self.hl.get_open_orders()
+                order_ids_open = [str(o.get("oid", "")) for o in open_orders]
+                entry_oid = str(pos.get("entry_order_id", ""))
+                if entry_oid and entry_oid not in order_ids_open:
+                    # Ordem preenchida! Agora colocar SL e TP
+                    is_buy = pos["direction"] == "LONG"
+                    try:
+                        sl_result = self.hl.place_order(
+                            symbol=symbol, is_buy=not is_buy, size=pos["size"],
+                            price=pos["stop_loss"], order_type="stop", reduce_only=True
+                        )
+                        tp1_size   = pos["size"] * CONFIG["partial_tp_pct"]
+                        tp1_result = self.hl.place_order(
+                            symbol=symbol, is_buy=not is_buy, size=tp1_size,
+                            price=pos["tp1"], order_type="limit", reduce_only=True
+                        )
+                        tp2_size   = pos["size"] * (1 - CONFIG["partial_tp_pct"])
+                        tp2_result = self.hl.place_order(
+                            symbol=symbol, is_buy=not is_buy, size=tp2_size,
+                            price=pos["tp2"], order_type="limit", reduce_only=True
+                        )
+                        pos["sl_order_id"]  = sl_result.get("order_id")
+                        pos["tp1_order_id"] = tp1_result.get("order_id")
+                        pos["tp2_order_id"] = tp2_result.get("order_id")
+                        pos["status"]       = "open"
+                        logger.info(f"{symbol}: ordem preenchida! SL/TP colocados.")
+                        self._notify(
+                            "✅ <b>ORDEM PREENCHIDA — " + symbol + "</b>\n"
+                            "Entrada confirmada em <code>$" + f"{pos['entry']:,.4f}" + "</code>\n"
+                            "🛑 SL, 🎯 TP1 e 🏆 TP2 colocados na exchange!"
+                        )
+                        self._save_state()
+                    except Exception as e:
+                        logger.error(f"Erro ao colocar SL/TP apos fill {symbol}: {e}")
+                        self._notify("🚨 <b>ERRO: fill confirmado mas SL/TP falharam em " + symbol + "</b>\n<code>" + str(e)[:150] + "</code>")
+                continue  # nao processa TP/SL enquanto ainda pendente
+
             is_long = pos["direction"] == "LONG"
             pnl_pct = ((current - pos["entry"]) / pos["entry"] * 100) if is_long \
                       else ((pos["entry"] - current) / pos["entry"] * 100)
             pos["peak_pnl"] = max(pos["peak_pnl"], pnl_pct)
+
+            # ── Alerta de liquidacao iminente ─────────────────────────────────
+            lev = pos.get("leverage", 1)
+            liq_pct = 80 / lev  # aproximacao: liquidacao ocorre com ~80% de margem usada
+            current_loss_pct = -pnl_pct if pnl_pct < 0 else 0
+            if current_loss_pct > liq_pct * 0.7:  # 70% do caminho para liquidacao
+                self._notify(
+                    "🚨 <b>ALERTA DE LIQUIDACAO — " + symbol + "</b>\n"
+                    "Posicao em risco severo de liquidacao!\n"
+                    "Perda atual: <code>" + f"{current_loss_pct:.1f}" + "%</code>\n"
+                    "Preco atual: <code>$" + f"{current:,.4f}" + "</code>\n"
+                    "CONSIDERE FECHAR MANUALMENTE com /fechar " + symbol
+                )
 
             hit_sl  = (is_long and current <= pos["stop_loss"]) or \
                       (not is_long and current >= pos["stop_loss"])
@@ -623,18 +738,21 @@ class HyperTraderAgent:
                     await asyncio.sleep(30)
                     continue
 
-                # [2.1] Reset daily_pnl automatico a meia-noite UTC
+                # [2.1] Reset daily_pnl e trades automatico a meia-noite UTC
                 today = datetime.now(timezone.utc).date()
                 if today != self._current_day:
-                    old_pnl            = self.daily_pnl
-                    self.daily_pnl     = 0.0
-                    self._current_day  = today
+                    old_pnl              = self.daily_pnl
+                    old_trades           = self.daily_trades_count
+                    self.daily_pnl       = 0.0
+                    self.daily_trades_count = 0
+                    self._current_day    = today
                     self._notify(
-                        "🌅 <b>Novo dia — P&amp;L diario resetado</b>\n"
-                        "P&amp;L do dia anterior: <code>$" + f"{old_pnl:+.2f}" + "</code>\n"
+                        "🌅 <b>Novo dia — contadores resetados</b>\n"
+                        "P&amp;L ontem: <code>$" + f"{old_pnl:+.2f}" + "</code>\n"
+                        "Trades ontem: <code>" + str(old_trades) + "/" + str(CONFIG['max_trades_day']) + "</code>\n"
                         "Iniciando novo dia zerado."
                     )
-                    logger.info(f"Daily PnL resetado. Ontem: ${old_pnl:+.2f}")
+                    logger.info(f"Novo dia. PnL ontem: ${old_pnl:+.2f} | Trades: {old_trades}")
 
                 # Stop diario
                 acc_val = self.hl.get_account_info().get("equity", 10000)
@@ -721,6 +839,7 @@ class HyperTraderAgent:
                     + "\n".join(resultados) + "\n\n"
                     "────────────────────\n"
                     "📊 Posicoes: <code>" + str(len(self.active_positions)) + "/" + str(CONFIG["max_positions"]) + "</code>\n"
+                    "🎯 Trades hoje: <code>" + str(self.daily_trades_count) + "/" + str(CONFIG["max_trades_day"]) + "</code>\n"
                     "💵 P&amp;L hoje: <code>$" + f"{self.daily_pnl:+.2f}" + "</code>\n"
                     "💵 P&amp;L sessao: <code>$" + f"{self.session_pnl:+.2f}" + "</code>\n"
                     "🏆 Win Rate: <code>" + str(wr) + "%</code> (" + str(self.stats["wins"]) + "W/" + str(self.stats["losses"]) + "L)\n"

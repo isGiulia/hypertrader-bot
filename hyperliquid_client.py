@@ -41,18 +41,19 @@ class HyperliquidClient:
             from eth_account import Account
 
             account = Account.from_key(self.private_key)
+            # SDK 0.22.0 — construtor: Exchange(account, base_url, account_address)
             self._exchange = Exchange(
                 account,
-                base_url=self.base_url,
+                self.base_url,
                 account_address=self.wallet_address or account.address
             )
-            self._info = Info(base_url=self.base_url, skip_ws=True)
-            logger.info("SDK Hyperliquid inicializado com assinatura EIP-712 real")
-        except ImportError:
+            self._info = Info(self.base_url, skip_ws=True)
+            logger.info("SDK hyperliquid-python-sdk 0.22.0 inicializado — EIP-712 real")
+        except ImportError as e:
             logger.error(
-                "ERRO CRITICO: SDK hyperliquid-python nao instalado!\n"
-                "Execute: pip install hyperliquid-python eth-account\n"
-                "Sem isso, ordens reais NAO funcionam!"
+                "ERRO CRITICO: SDK nao instalado!\n"
+                "Execute: pip install git+https://github.com/hyperliquid-dex/hyperliquid-python-sdk.git eth-account\n"
+                "Detalhe: " + str(e)
             )
         except Exception as e:
             logger.error(f"Erro ao inicializar SDK: {e}")
@@ -173,7 +174,8 @@ class HyperliquidClient:
         """Define alavancagem — sempre isolated margin (is_cross=False)"""
         if not self._exchange:
             raise RuntimeError("SDK nao inicializado — execute: pip install hyperliquid-python")
-        result = self._exchange.update_leverage(leverage, symbol, is_cross=is_cross)
+        # SDK 0.22.0: update_leverage(leverage, coin, is_cross)
+        result = self._exchange.update_leverage(leverage, symbol, is_cross)
         logger.info(f"Alavancagem {symbol}: {leverage}x ({'cross' if is_cross else 'isolated'})")
         return result
 
@@ -204,6 +206,7 @@ class HyperliquidClient:
         else:
             order_type_sdk = {"limit": {"tif": tif}}
 
+        # SDK 0.22.0: exchange.order(coin, is_buy, sz, limit_px, order_type, reduce_only)
         result = self._exchange.order(
             symbol,
             is_buy,
@@ -226,6 +229,7 @@ class HyperliquidClient:
         """Cancela uma ordem pelo ID"""
         if not self._exchange:
             raise RuntimeError("SDK nao inicializado")
+        # SDK 0.22.0: cancel(coin, oid)
         result = self._exchange.cancel(symbol, order_id)
         return result
 
