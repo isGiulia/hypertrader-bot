@@ -53,35 +53,34 @@ CONFIG = {
     "telegram_allowed_ids": os.getenv("TELEGRAM_ALLOWED_IDS", "0"),
 }
 
-TRADER_SYSTEM_PROMPT = """Trader profissional de perpetuals na Hyperliquid. Foco em lucro maximo e perda minima.
+TRADER_SYSTEM_PROMPT = """Trader profissional de perpetuals na Hyperliquid.
 
 REGRAS:
-- Analise Diario -> 4h -> 1h
+- Analise Diario(tendencia) -> 4h(estrutura) -> 1h(entrada)
 - Entre so com 3+ confluencias: BOS/CHoCH, order block, FVG, RSI, volume, funding
-- RR minimo 1:2. SL em zona tecnica.
-- LONG: tendencia alta + suporte + momentum positivo
-- SHORT: tendencia baixa + resistencia + momentum negativo
-- WAIT: mercado confuso, sem confluencia
+- RR minimo 1:2. SL em zona tecnica. Alavancagem maxima que o setup suportar.
+- LONG: tendencia alta + suporte confirmado + momentum positivo
+- SHORT: tendencia baixa + resistencia confirmada + momentum negativo
+- WAIT: mercado confuso, sem confluencia clara, risco elevado
 
-RESPONDA APENAS COM JSON:
-```json
-{
-  "signal": "LONG ou SHORT ou WAIT",
-  "confidence": 0,
-  "entry_price": 0.0,
-  "stop_loss": 0.0,
-  "take_profit_1": 0.0,
-  "take_profit_2": 0.0,
-  "leverage": 0,
-  "timeframe": "1h",
-  "momento": "HORA DE COMPRAR — mercado subindo com forca",
-  "ganho_maximo": "+45% = ~$450 em $1000",
-  "perda_maxima": "-15% = ~$150 em $1000",
-  "reasoning_tecnico": "analise tecnica em 2-3 frases",
-  "reasoning_simples": "explicacao simples com analogia em 2-3 frases",
-  "invalidation": "o que cancela o setup"
-}
-```
+CAMPOS DO JSON — preencha com dados REAIS da analise:
+- signal: "LONG", "SHORT" ou "WAIT"
+- confidence: numero de 0 a 100 (sua confianca no setup)
+- entry_price: preco exato de entrada sugerido
+- stop_loss: preco do stop loss (zona tecnica solida)
+- take_profit_1: primeiro alvo de lucro (RR 1:2 minimo)
+- take_profit_2: segundo alvo de lucro (RR 1:3 ou mais)
+- leverage: alavancagem sugerida (respeite o maximo da plataforma)
+- timeframe: timeframe principal da entrada
+- momento: frase curta em portugues dizendo SE E HORA DE COMPRAR, VENDER OU ESPERAR e por que
+- ganho_maximo: calcule o ganho em % com alavancagem e em dolares para $1000 de capital
+- perda_maxima: calcule a perda em % com alavancagem e em dolares para $1000 de capital
+- reasoning_tecnico: analise tecnica real e detalhada em 2-3 frases
+- reasoning_simples: mesma analise em portugues simples, use analogia do dia a dia
+- invalidation: o que faria o setup ser cancelado
+
+RESPONDA APENAS COM O JSON, sem texto antes ou depois, sem backticks:
+{"signal":"...","confidence":0,"entry_price":0.0,"stop_loss":0.0,"take_profit_1":0.0,"take_profit_2":0.0,"leverage":0,"timeframe":"1h","momento":"...","ganho_maximo":"...","perda_maxima":"...","reasoning_tecnico":"...","reasoning_simples":"...","invalidation":"..."}
 """
 
 
@@ -143,7 +142,7 @@ class HyperTraderAgent:
         self.history.append({"role": "user", "content": msg})
         resp = self.ai.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=512,
+            max_tokens=1024,
             system=TRADER_SYSTEM_PROMPT,
             messages=self.history
         )
@@ -154,16 +153,50 @@ class HyperTraderAgent:
         return answer
 
     def _extract_signal(self, text: str) -> Optional[dict]:
+        """Extrai o JSON do sinal — tenta varios formatos"""
+        # 1. Tenta ```json ... ```
         try:
             for m in re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL):
                 d = json.loads(m)
                 if "signal" in d:
                     return d
+        except Exception:
+            pass
+        # 2. Tenta ``` ... ```
+        try:
+            for m in re.findall(r"```\s*(.*?)\s*```", text, re.DOTALL):
+                d = json.loads(m)
+                if "signal" in d:
+                    return d
+        except Exception:
+            pass
+        # 3. Tenta JSON direto (sem backticks)
+        try:
             d = json.loads(text.strip())
             if "signal" in d:
                 return d
         except Exception:
             pass
+        # 4. Tenta encontrar { ... } no meio do texto
+        try:
+            m = re.search(r'\{[^{}]*"signal"[^{}]*\}', text, re.DOTALL)
+            if m:
+                d = json.loads(m.group(0))
+                if "signal" in d:
+                    return d
+        except Exception:
+            pass
+        # 5. Tenta o maior bloco JSON do texto
+        try:
+            start = text.find('{')
+            end   = text.rfind('}')
+            if start != -1 and end != -1:
+                d = json.loads(text[start:end+1])
+                if "signal" in d:
+                    return d
+        except Exception:
+            pass
+        logger.warning(f"Nao foi possivel extrair sinal do texto: {text[:200]}")
         return None
 
     def analyze_market(self, symbol: str) -> dict:
@@ -496,12 +529,20 @@ class HyperTraderAgent:
                             continue
                         r = self.analyze_market(sym)
                         s = r.get("signal")
-                        if s and s.get("signal") in ("LONG", "SHORT"):
+                        if s:
+                            sig  = s.get("signal", "WAIT")
                             conf = s.get("confidence", 0)
-                            if conf >= CONFIG["min_confidence"]:
+                            if sig in ("LONG", "SHORT") and conf >= CONFIG["min_confidence"]:
                                 self.execute_trade(sym, s)
-                            else:
-                                logger.info(f"{sym}: conf={conf}% abaixo do minimo")
+                            elif sig in ("LONG", "SHORT") and conf < CONFIG["min_confidence"]:
+                                dir_str = "COMPRA" if sig == "LONG" else "VENDA"
+                                self._notify(
+                                    "🟡 <b>" + sym + " — SINAL FRACO</b>\n"
+                                    + dir_str + " com <code>" + str(conf) + "%</code>"
+                                    + " de confianca (minimo: <code>"
+                                    + str(CONFIG["min_confidence"]) + "%</code>)"
+                                )
+                            # WAIT — nao notifica para nao spammar
                         await asyncio.sleep(8)
 
                 logger.info(
