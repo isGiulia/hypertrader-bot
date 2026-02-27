@@ -16,47 +16,86 @@ class MarketAnalyzer:
         self.hl = hl_client
     
     def _get_macro_context(self) -> dict:
-        """Busca Fear & Greed Index e contexto macro do mercado"""
+        """Busca Fear & Greed Index + BTC Dominance e contexto macro completo"""
         result = {
-            "fear_greed_index": None,
-            "fear_greed_label": "DESCONHECIDO",
+            "fear_greed_index":   None,
+            "fear_greed_label":   "DESCONHECIDO",
             "fear_greed_warning": "",
-            "data_source": "alternative.me"
+            "btc_dominance":      None,
+            "btc_dominance_trend": "desconhecido",
+            "btc_dominance_warning": "",
+            "data_source": "alternative.me + coingecko"
         }
+
+        # ── Fear & Greed ──────────────────────────────────────────────────
         try:
-            url = "https://api.alternative.me/fng/?limit=1&format=json"
-            req = urllib.request.urlopen(url, timeout=5)
+            req  = urllib.request.urlopen("https://api.alternative.me/fng/?limit=2&format=json", timeout=5)
             data = _json.loads(req.read().decode())
-            fng  = data["data"][0]
-            val  = int(fng["value"])
-            lbl  = fng["value_classification"]
+            fng  = data["data"]
+            val  = int(fng[0]["value"])
+            lbl  = fng[0]["value_classification"]
             result["fear_greed_index"] = val
             result["fear_greed_label"] = lbl
 
-            # Alerta de contexto para o modelo
             if val <= 20:
                 result["fear_greed_warning"] = (
-                    "ATENCAO: Fear & Greed em MEDO EXTREMO (" + str(val) + "). "
-                    "Sinais de COMPRA exigem confluencia MUITO FORTE — minimo 5 confirmacoes tecnicas. "
-                    "Probabilidade alta de continuacao da queda. Seja muito conservador."
+                    "MEDO EXTREMO F&G=" + str(val) + ": PROIBIDO LONG confianca>60%. "
+                    "Minimo 5 confluencias tecnicas obrigatorias. Alto risco de queda continuada."
                 )
             elif val <= 40:
                 result["fear_greed_warning"] = (
-                    "Mercado com MEDO (" + str(val) + "). "
-                    "Entradas de compra requerem confirmacao extra de volume e reversao."
+                    "MEDO F&G=" + str(val) + ": LONG exige 4+ confluencias. Reduza confianca em 15 pontos."
                 )
             elif val >= 80:
                 result["fear_greed_warning"] = (
-                    "ATENCAO: Fear & Greed em GANANCIA EXTREMA (" + str(val) + "). "
-                    "Sinais de VENDA tem alta probabilidade. Compras tem risco elevado de topo."
+                    "GANANCIA EXTREMA F&G=" + str(val) + ": PROIBIDO LONG confianca>60%. "
+                    "Mercado proximo de topo. SHORT tem maior probabilidade."
                 )
             elif val >= 60:
                 result["fear_greed_warning"] = (
-                    "Mercado com GANANCIA (" + str(val) + "). "
-                    "Cuidado com entradas de compra — mercado pode estar sobrecomprado."
+                    "GANANCIA F&G=" + str(val) + ": LONG com cautela. Mercado pode estar sobrecomprado."
                 )
         except Exception as e:
-            result["fear_greed_warning"] = "ERRO AO BUSCAR FEAR & GREED: " + str(e) + ". Seja conservador."
+            result["fear_greed_warning"] = "ERRO FEAR&GREED: " + str(e) + ". Assuma medo — seja conservador."
+
+        # ── BTC Dominance via CoinGecko ───────────────────────────────────
+        try:
+            req  = urllib.request.urlopen("https://api.coingecko.com/api/v3/global", timeout=5)
+            data = _json.loads(req.read().decode())
+            dom  = data.get("data", {}).get("market_cap_percentage", {}).get("btc", None)
+            if dom is not None:
+                dom = round(float(dom), 2)
+                result["btc_dominance"] = dom
+
+                if dom > 58:
+                    result["btc_dominance_trend"]   = "muito_alta"
+                    result["btc_dominance_warning"]  = (
+                        "BTC DOMINANCE MUITO ALTA (" + str(dom) + "%): "
+                        "Capital concentrado no BTC. Altcoins em risco severo de queda. "
+                        "REDUCAO OBRIGATORIA de confianca em LONG de altcoins em 25 pontos. "
+                        "Prefira BTC ou WAIT em altcoins."
+                    )
+                elif dom > 55:
+                    result["btc_dominance_trend"]   = "alta"
+                    result["btc_dominance_warning"]  = (
+                        "BTC DOMINANCE ALTA (" + str(dom) + "%): "
+                        "Altcoins perdendo forca relativa ao BTC. "
+                        "Reduza confianca em LONG de altcoins em 20 pontos."
+                    )
+                elif dom < 45:
+                    result["btc_dominance_trend"]   = "baixa"
+                    result["btc_dominance_warning"]  = (
+                        "BTC DOMINANCE BAIXA (" + str(dom) + "%): "
+                        "Alt season possivel — altcoins com boa liquidez relativa."
+                    )
+                else:
+                    result["btc_dominance_trend"]   = "neutra"
+                    result["btc_dominance_warning"]  = (
+                        "BTC DOMINANCE NEUTRA (" + str(dom) + "%): sem impacto relevante em altcoins."
+                    )
+        except Exception as e:
+            result["btc_dominance_warning"] = "ERRO BTC DOMINANCE: " + str(e) + ". Assuma dominancia alta — seja conservador em altcoins."
+
         return result
 
     def get_full_analysis(self, symbol: str) -> dict:
