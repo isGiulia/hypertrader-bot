@@ -50,8 +50,8 @@ CONFIG = {
     "partial_tp_pct":     0.50,
     "analysis_interval":  1800,  # 30min — economiza creditos. Mude para 900 se quiser 15min
     "pnl_update_interval":120,
-    "use_testnet":        False,
-    "dry_run":            True,
+    "use_testnet":        os.getenv("USE_TESTNET", "true").lower() == "true",
+    "dry_run":            os.getenv("DRY_RUN", "true").lower() == "true",
     "telegram_token":     os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "telegram_chat_id":   int(os.getenv("TELEGRAM_CHAT_ID", "0")),
     "telegram_allowed_ids": os.getenv("TELEGRAM_ALLOWED_IDS", "0"),
