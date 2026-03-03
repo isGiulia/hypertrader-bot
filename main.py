@@ -196,33 +196,59 @@ class HyperTraderAgent:
     # ── LLM — historico separado por simbolo ─────────────────────────────────
 
     def _chat(self, prompt: str, ctx: dict = None, symbol: str = "_default") -> str:
-        """Chat com historico separado por simbolo — evita contaminacao cruzada"""
-        msg = prompt
-        if ctx:
-            msg += "\n\n" + json.dumps(ctx, indent=2, default=str)
-        hist = self.history.setdefault(symbol, [])
-        hist.append({"role": "user", "content": msg})
+    
+    import time as _time
+    msg = prompt
+    if ctx:
+        msg += "\n\n" + json.dumps(ctx, indent=2, default=str)
+    hist = self.history.setdefault(symbol, [])
+    hist.append({"role": "user", "content": msg})
 
-        # Haiku para analise (20x mais barato) — suficiente para JSON estruturado
-        # Sonnet so para relatorios e chat livre (nao tem custo repetitivo)
-        use_sonnet = symbol in ("_report", "_chat")
-        resp = self.ai.messages.create(
-            model="claude-sonnet-4-6" if use_sonnet else "claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=[{
-                "type": "text",
-                "text": TRADER_SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"}  # cache do system prompt
-            }],
-            messages=hist
-        )
-        answer = resp.content[0].text
-        hist.append({"role": "assistant", "content": answer})
+    use_sonnet = symbol in ("_report", "_chat")
+    model = "claude-sonnet-4-6" if use_sonnet else "claude-haiku-4-5-20251001"
 
-        # Limitar historico a 20 mensagens por simbolo
-        if len(hist) > 20:
-            self.history[symbol] = hist[-20:]
-        return answer
+    for attempt in range(5):
+        try:
+            resp = self.ai.messages.create(
+                model=model,
+                max_tokens=1024,
+                system=[{
+                    "type": "text",
+                    "text": TRADER_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"}
+                }],
+                messages=hist
+            )
+            answer = resp.content[0].text
+            hist.append({"role": "assistant", "content": answer})
+            if len(hist) > 20:
+                self.history[symbol] = hist[-20:]
+            return answer
+
+        except Exception as e:
+            err = str(e)
+            # Erro 529 = servidor sobrecarregado — espera e tenta de novo
+            if "529" in err or "overloaded" in err.lower():
+                wait = 60 * (attempt + 1)  # 60s, 120s, 180s, 240s, 300s
+                logger.warning(f"API sobrecarregada (tentativa {attempt+1}/5). Aguardando {wait}s...")
+                self._notify(f"⏳ <b>API sobrecarregada</b>\nAguardando {wait}s antes de tentar novamente... (tentativa {attempt+1}/5)")
+                _time.sleep(wait)
+            # Erro de rate limit — espera menos
+            elif "rate" in err.lower() or "429" in err:
+                wait = 30 * (attempt + 1)
+                logger.warning(f"Rate limit (tentativa {attempt+1}/5). Aguardando {wait}s...")
+                _time.sleep(wait)
+            else:
+                # Erro diferente — nao tenta de novo
+                logger.error(f"Erro Claude [{symbol}]: {e}")
+                hist.pop()  # remove mensagem que falhou
+                return '{"signal":"WAIT","confidence":0,"reasoning_simples":"Erro na API"}'
+
+    # Esgotou tentativas
+        hist.pop()
+        logger.error(f"API indisponivel apos 5 tentativas [{symbol}]")
+        self._notify("🚨 <b>API Claude indisponivel</b>\nEsgotadas 5 tentativas. Sinal WAIT aplicado automaticamente.")
+        return '{"signal":"WAIT","confidence":0,"reasoning_simples":"API indisponivel"}'
 
     def _extract_signal(self, text: str) -> Optional[dict]:
         """Extrai JSON do sinal — tenta varios formatos"""
