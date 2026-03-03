@@ -189,7 +189,11 @@ class HyperliquidClient:
             raise RuntimeError("SDK nao inicializado")
 
         if order_type == "market":
-            ot_sdk = {"market": {}}
+            # Hyperliquid nao tem market order puro — usa limit IOC com slippage de 0.5%
+            slippage = 0.005
+            price = price * (1 + slippage) if is_buy else price * (1 - slippage)
+            price = round(price, 6)
+            ot_sdk = {"limit": {"tif": "Ioc"}}
         elif order_type == "stop":
             ot_sdk = {"trigger": {
                 "isMarket":  True,
