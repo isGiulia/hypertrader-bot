@@ -140,23 +140,35 @@ class HyperliquidClient:
     # ══════════════════════════════════════════════
     #  ACCOUNT
     # ══════════════════════════════════════════════
-
     def get_account_info(self) -> dict:
-        if not self.wallet_address:
-            return {"equity": 1000, "margin_used": 0, "positions": []}
-        try:
-            r      = self._post("info", {"type": "clearinghouseState", "user": self.wallet_address})
-            equity = float(r.get("marginSummary", {}).get("accountValue", 0))
-            margin = float(r.get("marginSummary", {}).get("totalMarginUsed", 0))
-            return {
-                "equity":      equity,
-                "margin_used": margin,
-                "free_margin": equity - margin,
-                "positions":   r.get("assetPositions", []),
-                "raw":         r
-            }
-        except Exception as e:
-            return {"equity": 0, "margin_used": 0, "positions": [], "error": str(e)}
+            if not self.wallet_address:
+                return {"equity": 1000, "margin_used": 0, "positions": []}
+            try:
+                r      = self._post("info", {"type": "clearinghouseState", "user": self.wallet_address})
+                equity = float(r.get("marginSummary", {}).get("accountValue", 0))
+                margin = float(r.get("marginSummary", {}).get("totalMarginUsed", 0))
+
+                # Conta unificada: se equity==0 busca USDC no Spot
+                if equity == 0:
+                    try:
+                        spot = self._post("info", {"type": "spotClearinghouseState",
+                                                "user": self.wallet_address})
+                        for bal in spot.get("balances", []):
+                            if bal.get("coin") == "USDC":
+                                equity = float(bal.get("total", 0))
+                                break
+                    except Exception:
+                        pass
+
+                return {
+                    "equity":      equity,
+                    "margin_used": margin,
+                    "free_margin": equity - margin,
+                    "positions":   r.get("assetPositions", []),
+                    "raw":         r
+                }
+            except Exception as e:
+                return {"equity": 0, "margin_used": 0, "positions": [], "error": str(e)}
 
     def get_open_orders(self) -> list:
         if not self.wallet_address:
