@@ -10,6 +10,7 @@ import json
 import asyncio
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 import anthropic
@@ -196,55 +197,54 @@ class HyperTraderAgent:
     # ── LLM — historico separado por simbolo ─────────────────────────────────
 
     def _chat(self, prompt: str, ctx: dict = None, symbol: str = "_default") -> str:
-    
-    import time as _time
-    msg = prompt
-    if ctx:
-        msg += "\n\n" + json.dumps(ctx, indent=2, default=str)
-    hist = self.history.setdefault(symbol, [])
-    hist.append({"role": "user", "content": msg})
 
-    use_sonnet = symbol in ("_report", "_chat")
-    model = "claude-sonnet-4-6" if use_sonnet else "claude-haiku-4-5-20251001"
+        msg = prompt
+        if ctx:
+            msg += "\n\n" + json.dumps(ctx, indent=2, default=str)
+        hist = self.history.setdefault(symbol, [])
+        hist.append({"role": "user", "content": msg})
 
-    for attempt in range(5):
-        try:
-            resp = self.ai.messages.create(
-                model=model,
-                max_tokens=1024,
-                system=[{
-                    "type": "text",
-                    "text": TRADER_SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"}
-                }],
-                messages=hist
-            )
-            answer = resp.content[0].text
-            hist.append({"role": "assistant", "content": answer})
-            if len(hist) > 20:
-                self.history[symbol] = hist[-20:]
-            return answer
+        use_sonnet = symbol in ("_report", "_chat")
+        model = "claude-sonnet-4-6" if use_sonnet else "claude-haiku-4-5-20251001"
 
-        except Exception as e:
-            err = str(e)
-            # Erro 529 = servidor sobrecarregado — espera e tenta de novo
-            if "529" in err or "overloaded" in err.lower():
-                wait = 60 * (attempt + 1)  # 60s, 120s, 180s, 240s, 300s
-                logger.warning(f"API sobrecarregada (tentativa {attempt+1}/5). Aguardando {wait}s...")
-                self._notify(f"⏳ <b>API sobrecarregada</b>\nAguardando {wait}s antes de tentar novamente... (tentativa {attempt+1}/5)")
-                _time.sleep(wait)
-            # Erro de rate limit — espera menos
-            elif "rate" in err.lower() or "429" in err:
-                wait = 30 * (attempt + 1)
-                logger.warning(f"Rate limit (tentativa {attempt+1}/5). Aguardando {wait}s...")
-                _time.sleep(wait)
-            else:
-                # Erro diferente — nao tenta de novo
-                logger.error(f"Erro Claude [{symbol}]: {e}")
-                hist.pop()  # remove mensagem que falhou
-                return '{"signal":"WAIT","confidence":0,"reasoning_simples":"Erro na API"}'
+        for attempt in range(5):
+            try:
+                resp = self.ai.messages.create(
+                    model=model,
+                    max_tokens=1024,
+                    system=[{
+                        "type": "text",
+                        "text": TRADER_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"}
+                    }],
+                    messages=hist
+                )
+                answer = resp.content[0].text
+                hist.append({"role": "assistant", "content": answer})
+                if len(hist) > 20:
+                    self.history[symbol] = hist[-20:]
+                return answer
 
-    # Esgotou tentativas
+            except Exception as e:
+                err = str(e)
+                # Erro 529 = servidor sobrecarregado — espera e tenta de novo
+                if "529" in err or "overloaded" in err.lower():
+                    wait = 60 * (attempt + 1)  # 60s, 120s, 180s, 240s, 300s
+                    logger.warning(f"API sobrecarregada (tentativa {attempt+1}/5). Aguardando {wait}s...")
+                    self._notify(f"⏳ <b>API sobrecarregada</b>\nAguardando {wait}s antes de tentar novamente... (tentativa {attempt+1}/5)")
+                    time.sleep(wait)
+                # Erro de rate limit — espera menos
+                elif "rate" in err.lower() or "429" in err:
+                    wait = 30 * (attempt + 1)
+                    logger.warning(f"Rate limit (tentativa {attempt+1}/5). Aguardando {wait}s...")
+                    time.sleep(wait)
+                else:
+                    # Erro diferente — nao tenta de novo
+                    logger.error(f"Erro Claude [{symbol}]: {e}")
+                    hist.pop()  # remove mensagem que falhou
+                    return '{"signal":"WAIT","confidence":0,"reasoning_simples":"Erro na API"}'
+
+        # Esgotou todas as tentativas — fora do for
         hist.pop()
         logger.error(f"API indisponivel apos 5 tentativas [{symbol}]")
         self._notify("🚨 <b>API Claude indisponivel</b>\nEsgotadas 5 tentativas. Sinal WAIT aplicado automaticamente.")
@@ -422,9 +422,8 @@ class HyperTraderAgent:
                 pos["entry_order_id"] = entry_oid
 
                 # ── Verificar se a ordem foi PREENCHIDA antes de colocar SL/TP ──
-                # Aguarda 3 segundos para dar tempo de preencher
-                import time as _time
-                _time.sleep(3)
+                # Aguarda 3s para dar tempo de preencher
+                time.sleep(3)
                 open_orders = self.hl.get_open_orders()
                 order_ids_open = [str(o.get("oid", "")) for o in open_orders]
                 entry_filled = str(entry_oid) not in order_ids_open
