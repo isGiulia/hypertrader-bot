@@ -37,14 +37,17 @@ CONFIG = {
     "hl_wallet_address":  os.getenv("HL_WALLET_ADDRESS", ""),
     "hl_private_key":     os.getenv("HL_PRIVATE_KEY", ""),
     "symbols":            ["BTC", "ETH", "SOL", "AVAX", "PEPE"],
-    "max_positions":      5,
-    "risk_per_trade":     0.025,
+    "trading_allocation": 0.20,  # 20% do capital total para trading — 80% protegido
+    "max_positions":      3,     # max posicoes abertas ao mesmo tempo
+    "risk_per_trade":     0.01,  # 1% do capital ALOCADO por trade (nao do total)
+    "max_trades_day":     3,     # 3 trades x 1% = 3% perda maxima possivel por dia
+    "daily_loss_limit":   0.03,  # 3% do capital alocado — matematicamente consistente
+    "drawdown_half":      10.0,  # caiu 10% do pico historico -> posicoes reduzidas 50%
+    "drawdown_stop":      20.0,  # caiu 20% do pico historico -> para completamente
     "default_leverage":   5,
     "leverage_fallback":  10,
-    "max_leverage":       10,    # SEGURANCA: nunca mais que 10x para comecar
+    "max_leverage":       10,    # nunca mais que 10x
     "min_confidence":     75,
-    "max_trades_day":     3,     # maximo de trades novos por dia
-    "daily_loss_limit":   0.06,
     "take_profit_ratio":  2.0,
     "trailing_stop":      True,
     "partial_tp_pct":     0.50,
@@ -324,14 +327,17 @@ class HyperTraderAgent:
         ganho        = signal.get("ganho_maximo", "")
         perda        = signal.get("perda_maxima", "")
 
-        val = self.risk.validate_trade(signal, self.active_positions, self.daily_pnl)
+        acc    = self.hl.get_account_info()
+        equity = acc.get("equity", 1000)
+
+        # Atualiza pico e valida com equity atual (drawdown protection)
+        val = self.risk.validate_trade(signal, self.active_positions, self.daily_pnl,
+                                       total_equity=equity)
         if not val["approved"]:
             logger.warning(f"Bloqueado [{symbol}]: {val['reason']}")
             return {"status": "blocked", "reason": val["reason"]}
 
-        acc    = self.hl.get_account_info()
-        equity = acc.get("equity", 1000)
-        size   = self.risk.calculate_position_size(equity, entry, sl)
+        size = self.risk.calculate_position_size(equity, entry, sl)
 
         risk_pct   = abs(entry - sl)   / entry * 100 if entry > 0 else 0
         tp1_pct    = abs(tp1 - entry)  / entry * 100 if entry > 0 else 0
@@ -754,9 +760,14 @@ class HyperTraderAgent:
                     )
                     logger.info(f"Novo dia. PnL ontem: ${old_pnl:+.2f} | Trades: {old_trades}")
 
-                # Stop diario
-                acc_val = self.hl.get_account_info().get("equity", 10000)
-                daily_limit_usd = acc_val * CONFIG["daily_loss_limit"]
+                # Atualiza pico e calcula metricas de risco
+                acc_val  = self.hl.get_account_info().get("equity", 10000)
+                self.risk.update_peak(acc_val)
+                metrics  = self.risk.get_risk_metrics(acc_val, self.active_positions)
+                trade_cap = metrics["trading_capital"]
+                dd_pct    = metrics["drawdown_pct"]
+                dd_status = metrics["drawdown_status"]
+                daily_limit_usd = trade_cap * CONFIG["daily_loss_limit"]
                 if self.daily_pnl < 0 and abs(self.daily_pnl) >= daily_limit_usd:
                     self._notify(
                         "⛔ <b>STOP DIARIO ATINGIDO</b>\n"
@@ -838,8 +849,11 @@ class HyperTraderAgent:
                     "────────────────────\n"
                     + "\n".join(resultados) + "\n\n"
                     "────────────────────\n"
+                    "💼 Capital total: <code>$" + f"{acc_val:,.2f}" + "</code>\n"
+                    "🎯 Em trading (20%): <code>$" + f"{trade_cap:,.2f}" + "</code>\n"
+                    "📉 Drawdown: <code>" + f"{dd_pct:.1f}%" + "</code> " + dd_status + "\n"
                     "📊 Posicoes: <code>" + str(len(self.active_positions)) + "/" + str(CONFIG["max_positions"]) + "</code>\n"
-                    "🎯 Trades hoje: <code>" + str(self.daily_trades_count) + "/" + str(CONFIG["max_trades_day"]) + "</code>\n"
+                    "🔢 Trades hoje: <code>" + str(self.daily_trades_count) + "/" + str(CONFIG["max_trades_day"]) + "</code>\n"
                     "💵 P&amp;L hoje: <code>$" + f"{self.daily_pnl:+.2f}" + "</code>\n"
                     "💵 P&amp;L sessao: <code>$" + f"{self.session_pnl:+.2f}" + "</code>\n"
                     "🏆 Win Rate: <code>" + str(wr) + "%</code> (" + str(self.stats["wins"]) + "W/" + str(self.stats["losses"]) + "L)\n"
