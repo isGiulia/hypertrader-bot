@@ -37,13 +37,15 @@ CONFIG = {
     "hl_wallet_address":  os.getenv("HL_WALLET_ADDRESS", ""),
     "hl_private_key":     os.getenv("HL_PRIVATE_KEY", ""),
     "symbols":            ["BTC", "ETH", "SOL", "AVAX", "PEPE"],
-    "trading_allocation": 0.20,  # 20% do capital total para trading — 80% protegido
+    # ── Gestao de capital ─────────────────────────────────────────────────
+    "trading_allocation": 1.0,   # 100% do equity como base de calculo
     "max_positions":      3,     # max posicoes abertas ao mesmo tempo
-    "risk_per_trade":     0.01,  # 1% do capital ALOCADO por trade (nao do total)
-    "max_trades_day":     3,     # 3 trades x 1% = 3% perda maxima possivel por dia
-    "daily_loss_limit":   0.03,  # 3% do capital alocado — matematicamente consistente
-    "drawdown_half":      10.0,  # caiu 10% do pico historico -> posicoes reduzidas 50%
-    "drawdown_stop":      20.0,  # caiu 20% do pico historico -> para completamente
+    "risk_per_trade":     0.01,  # 1% do capital TOTAL por trade (~$10 em $1.000)
+    "max_trades_day":     3,     # 3 trades x 1% = 3% perda maxima por dia
+    "daily_loss_limit":   0.03,  # 3% do capital total — igual a 3 stops no dia
+    "drawdown_half":      10.0,  # caiu 10% do pico -> posicoes reduzidas 50%
+    "drawdown_stop":      20.0,  # caiu 20% do pico -> para completamente
+    # ── Alavancagem ───────────────────────────────────────────────────────
     "default_leverage":   5,
     "leverage_fallback":  10,
     "max_leverage":       10,    # nunca mais que 10x
