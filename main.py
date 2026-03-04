@@ -319,6 +319,13 @@ class HyperTraderAgent:
                     return {"status":"rejected","reason":str(res)}
 
                 entry_oid = res.get("order_id"); pos["entry_order_id"]=entry_oid
+
+                # Para market order: aguarda 2s e verifica fill imediato
+                if otype=="market":
+                    time.sleep(2)
+                    # preco real de entrada sera confirmado pelo monitor
+                    logger.info(f"Market order {symbol} enviada, oid={entry_oid}")
+
                 if otype=="limit":
                     time.sleep(3)
                     open_oids = [str(o.get("oid","")) for o in self.hl.get_open_orders()]
@@ -327,6 +334,21 @@ class HyperTraderAgent:
                         self.active_positions[symbol]=pos; self.stats["total"]+=1; self.daily_trades_count+=1
                         self._notify(f"⏳ <b>AGUARDANDO FILL — {symbol}</b>\nLimit @ <code>${entry:,.4f}</code>")
                         self._save_state(); return {"status":"pending_fill"}
+
+                # Confirma que a posicao existe na exchange antes de registrar
+                time.sleep(2)
+                real_positions = self.hl.get_account_info().get("positions", [])
+                real_coins = [p.get("position", {}).get("coin", "") for p in real_positions
+                              if float(p.get("position", {}).get("szi", 0)) != 0]
+                if symbol not in real_coins:
+                    logger.error(f"ORDEM NAO CONFIRMADA [{symbol}] — posicao nao encontrada na exchange apos execucao")
+                    self._notify(
+                        f"🚨 <b>ORDEM NAO CONFIRMADA — {symbol}</b>\n"
+                        f"A ordem foi enviada mas a posicao NAO aparece na exchange.\n"
+                        f"SL e TP NAO foram colocados.\n"
+                        f"Verifique manualmente em app.hyperliquid-testnet.xyz"
+                    )
+                    return {"status": "unconfirmed"}
 
                 pos = self._place_sl_tp(symbol, pos, size, is_buy, sl, tp1, tp2)
                 pos["status"]="open"
@@ -340,9 +362,10 @@ class HyperTraderAgent:
         self._save_state()
         em = "🟢" if direction=="LONG" else "🔴"
         simple=signal.get("reasoning_simples",""); ganho=signal.get("ganho_maximo",""); perda=signal.get("perda_maxima","")
-        msg=(f"{em} <b>ENTRADA — {direction}</b>\n────────────────────\n"
+        sl_status = f"<code>${sl:,.4f}</code> (-{risk_pct:.2f}%)" if not CONFIG["dry_run"] and pos.get("sl_order_id") else f"<code>${sl:,.4f}</code> ⚠️ SL NAO COLOCADO"
+        msg=(f"{em} <b>ENTRADA CONFIRMADA — {direction}</b>\n────────────────────\n"
              f"Par: <code>{symbol}/USDC</code>\nLev: <code>{leverage}x</code> | Conf: <code>{confidence}%</code>\n\n"
-             f"💵 Entrada: <code>${entry:,.4f}</code>\n🛑 SL: <code>${sl:,.4f}</code> (-{risk_pct:.2f}%)\n"
+             f"💵 Entrada: <code>${entry:,.4f}</code>\n🛑 SL: {sl_status}\n"
              f"🎯 TP1: <code>${tp1:,.4f}</code> (+{tp1_pct:.2f}%)\n🏆 TP2: <code>${tp2:,.4f}</code> (+{tp2_pct:.2f}%)\n\n"
              f"📐 R:R: <code>1:{rr_ratio}</code>\n")
         if ganho: msg+=f"💰 {ganho}\n"
