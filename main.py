@@ -106,6 +106,8 @@ class HyperTraderAgent:
         self.daily_trades_count      = 0
         self._load_state()
         self._load_leverage_limits()
+        if not CONFIG["dry_run"]:
+            self._sync_with_exchange()
         logger.info(f"HyperTrader iniciado | {CONFIG['symbols']} | {'TESTNET' if CONFIG['use_testnet'] else 'MAINNET'} | {'DRY RUN' if CONFIG['dry_run'] else 'LIVE'}")
 
     # ── Persistencia
@@ -143,6 +145,78 @@ class HyperTraderAgent:
             for sym in CONFIG["symbols"]:
                 self.asset_leverage_map[sym] = info.get(sym,{}).get("maxLeverage",CONFIG["leverage_fallback"])
         except Exception as e: logger.warning(f"leverage limits: {e}")
+
+    def _sync_with_exchange(self):
+        """Sincroniza estado interno com posições reais na Hyperliquid ao iniciar."""
+        try:
+            logger.info("Sincronizando com a exchange...")
+            acc          = self.hl.get_account_info()
+            real_pos     = self.hl.get_all_positions()
+            open_orders  = self.hl.get_open_orders()
+            fills_summary = self.hl.get_fills_summary()
+            funding      = self.hl.get_funding_summary()
+            equity       = acc.get("equity", 0)
+
+            # Adiciona posições reais que não estão no estado
+            for sym, rp in real_pos.items():
+                if sym not in self.active_positions:
+                    direction = "LONG" if rp["is_long"] else "SHORT"
+                    logger.warning(f"Posição real encontrada: {sym} {direction} size={rp['size']}")
+                    self.active_positions[sym] = {
+                        "direction": direction,
+                        "entry":     rp["entry_price"],
+                        "stop_loss": 0, "tp1": 0, "tp2": 0,
+                        "size":      rp["size"],
+                        "leverage":  self.get_leverage_for(sym),
+                        "equity_open": equity,
+                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                        "peak_pnl":  0.0, "tp1_hit": False, "status": "open",
+                        "entry_order_id": None, "sl_order_id": None,
+                        "tp1_order_id": None, "tp2_order_id": None,
+                        "synced_from_exchange": True,
+                        "unrealized_pnl": rp["unrealized_pnl"],
+                        "liq_price": rp["liq_price"],
+                    }
+
+            # Remove do estado posições que não existem mais na exchange
+            for sym in list(self.active_positions.keys()):
+                if sym not in real_pos:
+                    logger.warning(f"Posição {sym} no estado mas não na exchange — removendo")
+                    del self.active_positions[sym]
+
+            self._save_state()
+
+            net = "TESTNET" if CONFIG["use_testnet"] else "MAINNET"
+            msg = (f"🔄 <b>Bot Reiniciado — Sincronizado</b>\n────────────────────\n"
+                   f"🌐 {net} | {'DRY RUN' if CONFIG['dry_run'] else '🔴 LIVE'}\n"
+                   f"💼 Capital: <code>${equity:,.2f}</code>\n"
+                   f"📊 Posições abertas: <code>{len(real_pos)}</code>\n"
+                   f"📋 Ordens abertas: <code>{len(open_orders)}</code>\n"
+                   f"💰 Fills totais: <code>{fills_summary['total_trades']}</code> | "
+                   f"Fees: <code>${fills_summary['total_fee']:.4f}</code>\n"
+                   f"📈 P&L realizado (fills): <code>${fills_summary['total_pnl']:+.4f}</code>\n"
+                   f"💸 Funding 24h: <code>${funding['total_funding_usd']:+.4f}</code>\n")
+
+            if real_pos:
+                msg += "────────────────────\n"
+                for sym, rp in real_pos.items():
+                    em = "🟢" if rp["is_long"] else "🔴"
+                    msg += (f"{em} <b>{sym}</b> {'LONG' if rp['is_long'] else 'SHORT'}\n"
+                            f"  Entrada: <code>${rp['entry_price']:,.4f}</code> | "
+                            f"P&L: <code>${rp['unrealized_pnl']:+.2f}</code> | "
+                            f"Liq: <code>${rp['liq_price']:,.4f}</code>\n")
+
+            if open_orders:
+                msg += "────────────────────\n📋 <b>Ordens abertas:</b>\n"
+                for o in open_orders[:8]:
+                    side = "BUY" if o.get("side") == "B" else "SELL"
+                    msg += f"  • {o.get('coin')} {side} @ <code>${float(o.get('limitPx',0)):,.4f}</code> sz={o.get('sz')}\n"
+
+            msg += f"\n🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+            self._notify(msg)
+            logger.info(f"Sync OK: {len(real_pos)} posicoes, {len(open_orders)} ordens abertas")
+        except Exception as e:
+            logger.error(f"Erro sync exchange: {e}", exc_info=True)
 
     def get_leverage_for(self, symbol: str) -> int:
         configured   = CONFIG["leverage_map"].get(symbol, CONFIG["leverage_fallback"])
@@ -299,41 +373,92 @@ class HyperTraderAgent:
                 logger.info(f"{symbol}: {otype} order diff={diff_pct:.3f}%")
 
                 res = self.hl.place_order(symbol=symbol, is_buy=is_buy, size=size, price=exec_price, order_type=otype)
-                if res.get("status")!="ok":
-                    self._notify(f"⚠️ <b>ORDEM REJEITADA — {symbol}</b>\n<code>{str(res.get('raw',''))[:150]}</code>")
-                    return {"status":"rejected","reason":str(res)}
+                if res.get("status") != "ok":
+                    self._notify(f"⚠️ <b>ORDEM REJEITADA — {symbol}</b>\n<code>{str(res.get('raw',''))[:200]}</code>")
+                    return {"status": "rejected", "reason": str(res)}
 
-                entry_oid = res.get("order_id"); pos["entry_order_id"]=entry_oid
-                if otype=="limit":
-                    time.sleep(3)
-                    open_oids = [str(o.get("oid","")) for o in self.hl.get_open_orders()]
+                entry_oid  = res.get("order_id")
+                exec_ts    = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+                pos["entry_order_id"] = entry_oid
+
+                # Se resposta já veio com fill, usa avgPx direto
+                if res.get("filled") and res.get("avg_px", 0) > 0:
+                    real_entry = res["avg_px"]
+                    pos["entry"] = real_entry
+                    logger.info(f"Fill imediato: avgPx={real_entry}")
+                else:
+                    # Aguarda e verifica se foi preenchida
+                    time.sleep(2)
+                    open_oids = [str(o.get("oid", "")) for o in self.hl.get_open_orders()]
                     if str(entry_oid) in open_oids:
-                        pos["status"]="pending_fill"
-                        self.active_positions[symbol]=pos; self.stats["total"]+=1; self.daily_trades_count+=1
-                        self._notify(f"⏳ <b>AGUARDANDO FILL — {symbol}</b>\nLimit @ <code>${entry:,.4f}</code>")
-                        self._save_state(); return {"status":"pending_fill"}
+                        pos["status"] = "pending_fill"
+                        self.active_positions[symbol] = pos
+                        self.stats["total"] += 1
+                        self.daily_trades_count += 1
+                        self._notify(
+                            f"⏳ <b>ORDEM ABERTA — {symbol}</b>\n────────────────────\n"
+                            f"Tipo: <code>LIMIT {direction}</code>\n"
+                            f"Preço: <code>${exec_price:,.4f}</code> | Size: <code>{size}</code>\n"
+                            f"ID: <code>{entry_oid}</code>\n"
+                            f"Status: <b>Aguardando preenchimento</b>\n"
+                            f"🕐 {exec_ts}"
+                        )
+                        self._save_state()
+                        return {"status": "pending_fill"}
+
+                    # Preenchida — busca preço real via userFills
+                    real_entry = exec_price
+                    try:
+                        last = self.hl.get_last_fill(symbol)
+                        if last and last.get("price", 0) > 0:
+                            real_entry = last["price"]
+                            logger.info(f"Fill via userFills: px={real_entry} fee=${last.get('fee',0)}")
+                    except Exception:
+                        pass
+                    pos["entry"] = real_entry
 
                 pos = self._place_sl_tp(symbol, pos, size, is_buy, sl, tp1, tp2)
-                pos["status"]="open"
-                self.active_positions[symbol]=pos; self.stats["total"]+=1; self.daily_trades_count+=1
-                logger.info(f"{direction} {symbol} @ ${entry:,.4f} SL={pos['sl_order_id']}")
+                pos["status"] = "open"
+                self.active_positions[symbol] = pos
+                self.stats["total"] += 1
+                self.daily_trades_count += 1
+                logger.info(f"{direction} {symbol} executado @ ${pos['entry']:,.4f} SL={pos['sl_order_id']} TP1={pos['tp1_order_id']}")
             except Exception as e:
                 logger.error(f"Erro execucao {symbol}: {e}", exc_info=True)
                 self._notify(f"🚨 <b>ERRO execucao {symbol}</b>\n<code>{str(e)[:200]}</code>")
                 return {"status":"error","error":str(e)}
 
         self._save_state()
-        em = "🟢" if direction=="LONG" else "🔴"
-        simple=signal.get("reasoning_simples",""); ganho=signal.get("ganho_maximo",""); perda=signal.get("perda_maxima","")
-        msg=(f"{em} <b>ENTRADA — {direction}</b>\n────────────────────\n"
-             f"Par: <code>{symbol}/USDC</code>\nLev: <code>{leverage}x</code> | Conf: <code>{confidence}%</code>\n\n"
-             f"💵 Entrada: <code>${entry:,.4f}</code>\n🛑 SL: <code>${sl:,.4f}</code> (-{risk_pct:.2f}%)\n"
-             f"🎯 TP1: <code>${tp1:,.4f}</code> (+{tp1_pct:.2f}%)\n🏆 TP2: <code>${tp2:,.4f}</code> (+{tp2_pct:.2f}%)\n\n"
-             f"📐 R:R: <code>1:{rr_ratio}</code>\n")
-        if ganho: msg+=f"💰 {ganho}\n"
-        if perda: msg+=f"⚠️ {perda}\n"
-        if simple: msg+=f"\n💬 {simple}\n"
-        msg+=f"\n🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')} | {'DRY RUN' if CONFIG['dry_run'] else 'LIVE 🔴'}"
+        em       = "🟢" if direction=="LONG" else "🔴"
+        simple   = signal.get("reasoning_simples","")
+        ganho    = signal.get("ganho_maximo","")
+        perda    = signal.get("perda_maxima","")
+        exec_now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        real_e   = pos.get("entry", entry)
+        risk_pct = abs(real_e-sl)/real_e*100 if real_e>0 else 0
+        tp1_pct  = abs(tp1-real_e)/real_e*100 if real_e>0 else 0
+        tp2_pct  = abs(tp2-real_e)/real_e*100 if real_e>0 else 0
+
+        msg = (f"{em} <b>ENTRADA EXECUTADA — {direction}</b>\n────────────────────\n"
+               f"Par: <code>{symbol}/USDC</code> | Lev: <code>{leverage}x</code> | Conf: <code>{confidence}%</code>\n\n"
+               f"💵 Executado: <code>${real_e:,.4f}</code>\n"
+               f"📦 Size: <code>{size}</code> contratos\n"
+               f"🛑 SL: <code>${sl:,.4f}</code> (-{risk_pct:.2f}%)\n"
+               f"🎯 TP1: <code>${tp1:,.4f}</code> (+{tp1_pct:.2f}%)\n"
+               f"🏆 TP2: <code>${tp2:,.4f}</code> (+{tp2_pct:.2f}%)\n\n"
+               f"📐 R:R: <code>1:{rr_ratio}</code>\n")
+        if not CONFIG["dry_run"]:
+            sl_id  = pos.get("sl_order_id","?")
+            tp1_id = pos.get("tp1_order_id","?")
+            tp2_id = pos.get("tp2_order_id","?")
+            msg += (f"\n🔗 IDs na Exchange:\n"
+                    f"  SL: <code>{sl_id}</code>\n"
+                    f"  TP1: <code>{tp1_id}</code>\n"
+                    f"  TP2: <code>{tp2_id}</code>\n")
+        if ganho:  msg += f"💰 {ganho}\n"
+        if perda:  msg += f"⚠️ {perda}\n"
+        if simple: msg += f"\n💬 {simple}\n"
+        msg += f"\n🕐 {exec_now} | {'DRY RUN' if CONFIG['dry_run'] else '🔴 LIVE'}"
         self._notify(msg)
         return {"status":"dry_run" if CONFIG["dry_run"] else "executed"}
 
@@ -363,69 +488,131 @@ class HyperTraderAgent:
     # ── Monitor
 
     def monitor_positions(self):
+        # Busca posições reais na exchange uma vez para todos os símbolos
+        real_positions = {}
+        if not CONFIG["dry_run"]:
+            try:
+                real_positions = self.hl.get_all_positions()
+            except Exception as e:
+                logger.error(f"monitor get_all_positions: {e}")
+
         for symbol, pos in list(self.active_positions.items()):
             current = self.hl.get_mark_price(symbol)
-            if current==0: continue
+            if current == 0: continue
 
-            if pos.get("status")=="pending_fill" and not CONFIG["dry_run"]:
+            # Verifica se posição ainda existe na exchange (apenas LIVE)
+            if not CONFIG["dry_run"] and symbol not in real_positions:
+                logger.warning(f"Posição {symbol} não encontrada na exchange — pode ter sido fechada externamente")
+                self._notify(
+                    f"⚠️ <b>Posição {symbol} não encontrada na exchange</b>\n"
+                    f"Pode ter sido fechada por SL/TP ou manualmente.\n"
+                    f"Removendo do estado interno.\n"
+                    f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+                )
+                self.trade_history.append({**pos, "symbol": symbol, "exit": current,
+                                           "exit_reason": "Fechada externamente", "pnl_usd": 0})
+                del self.active_positions[symbol]
+                self._save_state()
+                continue
+
+            if pos.get("status") == "pending_fill" and not CONFIG["dry_run"]:
                 open_oids = [str(o.get("oid","")) for o in self.hl.get_open_orders()]
                 if str(pos.get("entry_order_id","")) not in open_oids:
                     try:
-                        is_buy=pos["direction"]=="LONG"
-                        pos=self._place_sl_tp(symbol,pos,pos["size"],is_buy,pos["stop_loss"],pos["tp1"],pos["tp2"])
-                        pos["status"]="open"; self.active_positions[symbol]=pos
-                        self._notify(f"✅ <b>FILL — {symbol}</b>\nEntrada @ <code>${pos['entry']:,.4f}</code>. SL/TP colocados!")
+                        is_buy = pos["direction"] == "LONG"
+                        # Pega preço real de entrada da exchange
+                        if symbol in real_positions:
+                            pos["entry"] = real_positions[symbol]["entry"]
+                        pos = self._place_sl_tp(symbol, pos, pos["size"], is_buy, pos["stop_loss"], pos["tp1"], pos["tp2"])
+                        pos["status"] = "open"
+                        self.active_positions[symbol] = pos
+                        self._notify(
+                            f"✅ <b>FILL CONFIRMADO — {symbol}</b>\n────────────────────\n"
+                            f"Entrada real: <code>${pos['entry']:,.4f}</code>\n"
+                            f"SL: <code>{pos.get('sl_order_id','?')}</code>\n"
+                            f"TP1: <code>{pos.get('tp1_order_id','?')}</code>\n"
+                            f"TP2: <code>{pos.get('tp2_order_id','?')}</code>\n"
+                            f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+                        )
                         self._save_state()
                     except Exception as e:
                         logger.error(f"pos fill {symbol}: {e}")
                         self._notify(f"🚨 FILL ok mas SL/TP falharam — {symbol}: {e}")
                 continue
 
-            is_long = pos["direction"]=="LONG"
-            pnl_pct = ((current-pos["entry"])/pos["entry"]*100) if is_long else ((pos["entry"]-current)/pos["entry"]*100)
-            pos["peak_pnl"]=max(pos["peak_pnl"],pnl_pct)
+            is_long = pos["direction"] == "LONG"
+            entry   = float(pos.get("entry", 0) or current)
+            if entry == 0: entry = current
+            pnl_pct = ((current-entry)/entry*100) if is_long else ((entry-current)/entry*100)
+            pos["peak_pnl"] = max(pos["peak_pnl"], pnl_pct)
 
-            lev=pos.get("leverage",1); liq_pct=80/lev; loss=-pnl_pct if pnl_pct<0 else 0
-            if loss>liq_pct*0.7:
-                self._notify(f"🚨 <b>ALERTA LIQUIDACAO — {symbol}</b>\nPerda: <code>{loss:.1f}%</code> (liq em ~{liq_pct:.1f}%)\n/fechar {symbol}")
+            # P&L real da exchange se disponível
+            real_pnl_usd = real_positions.get(symbol, {}).get("unrealized_pnl", None)
 
-            hit_sl  = (is_long and current<=pos["stop_loss"]) or (not is_long and current>=pos["stop_loss"])
-            hit_tp1 = (not pos["tp1_hit"]) and ((is_long and current>=pos["tp1"]) or (not is_long and current<=pos["tp1"]))
-            hit_tp2 = pos["tp1_hit"] and ((is_long and current>=pos["tp2"]) or (not is_long and current<=pos["tp2"]))
+            lev     = pos.get("leverage", 1)
+            liq_pct = 80/lev
+            loss    = -pnl_pct if pnl_pct < 0 else 0
+            if loss > liq_pct*0.7:
+                self._notify(
+                    f"🚨 <b>ALERTA LIQUIDAÇÃO — {symbol}</b>\n"
+                    f"Perda: <code>{loss:.1f}%</code> (liquidação em ~{liq_pct:.1f}%)\n"
+                    f"P&L: <code>${real_pnl_usd:+.2f}</code>\n"
+                    f"Use /fechar {symbol} para fechar agora!\n"
+                    f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+                )
+
+            sl  = float(pos.get("stop_loss", 0) or 0)
+            tp1 = float(pos.get("tp1", 0) or 0)
+            tp2 = float(pos.get("tp2", 0) or 0)
+
+            hit_sl  = sl  > 0 and ((is_long and current<=sl)  or (not is_long and current>=sl))
+            hit_tp1 = tp1 > 0 and (not pos["tp1_hit"]) and ((is_long and current>=tp1) or (not is_long and current<=tp1))
+            hit_tp2 = tp2 > 0 and pos["tp1_hit"] and ((is_long and current>=tp2) or (not is_long and current<=tp2))
 
             if hit_sl:
                 self._close_position(symbol, pos, current, "Stop Loss atingido")
             elif hit_tp2:
                 self._close_position(symbol, pos, current, "TP2 atingido")
             elif hit_tp1:
-                partial=pos["size"]*CONFIG["partial_tp_pct"]
+                partial = pos["size"]*CONFIG["partial_tp_pct"]
                 if not CONFIG["dry_run"]:
-                    self.hl.place_order(symbol=symbol,is_buy=not is_long,size=partial,price=current,order_type="market",reduce_only=True)
-                pos["size"]-=partial; pos["stop_loss"]=pos["entry"]; pos["tp1_hit"]=True
-                # Atualiza SL para breakeven na exchange
+                    self.hl.place_order(symbol=symbol, is_buy=not is_long, size=partial, price=current, order_type="market", reduce_only=True)
+                pos["size"] -= partial
+                pos["stop_loss"] = entry
+                pos["tp1_hit"]   = True
                 if not CONFIG["dry_run"] and pos.get("sl_order_id"):
                     try:
-                        self.hl.cancel_order(symbol,pos["sl_order_id"])
-                        r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=pos["size"],price=pos["entry"],order_type="stop",reduce_only=True)
-                        pos["sl_order_id"]=r.get("order_id")
-                    except Exception as e: logger.error(f"Breakeven SL {symbol}: {e}")
-                lev_pnl=pnl_pct*pos["leverage"]
-                self._notify(f"🎯 <b>TP1 — {symbol}</b>\n<code>+{lev_pnl:.2f}%</code> | SL movido para entrada. TP2: <code>${pos['tp2']:,.4f}</code>")
+                        self.hl.cancel_order(symbol, pos["sl_order_id"])
+                        r = self.hl.place_order(symbol=symbol, is_buy=not is_long, size=pos["size"], price=entry, order_type="stop", reduce_only=True)
+                        pos["sl_order_id"] = r.get("order_id")
+                    except Exception as e:
+                        logger.error(f"Breakeven SL {symbol}: {e}")
+                lev_pnl = pnl_pct*lev
+                self._notify(
+                    f"🎯 <b>TP1 ATINGIDO — {symbol}</b>\n────────────────────\n"
+                    f"Resultado parcial: <code>+{lev_pnl:.2f}%</code>\n"
+                    f"SL movido para entrada: <code>${entry:,.4f}</code>\n"
+                    f"Próximo alvo TP2: <code>${tp2:,.4f}</code>\n"
+                    f"🕐 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+                )
                 self._save_state()
             elif pos["tp1_hit"] and CONFIG.get("trailing_stop"):
-                atr=self._get_atr(symbol)
-                if atr>0:
-                    new_sl=self.risk.calculate_trailing_stop(current,pos["direction"],atr)
-                    improved=(is_long and new_sl>pos["stop_loss"]) or (not is_long and new_sl<pos["stop_loss"])
+                atr = self._get_atr(symbol)
+                if atr > 0:
+                    new_sl   = self.risk.calculate_trailing_stop(current, pos["direction"], atr)
+                    improved = (is_long and new_sl>pos["stop_loss"]) or (not is_long and new_sl<pos["stop_loss"])
                     if improved:
-                        old_sl=pos["stop_loss"]; pos["stop_loss"]=new_sl
+                        old_sl = pos["stop_loss"]
+                        pos["stop_loss"] = new_sl
                         logger.info(f"Trailing {symbol}: ${old_sl:.4f}->${new_sl:.4f}")
                         if not CONFIG["dry_run"] and pos.get("sl_order_id"):
                             try:
-                                self.hl.cancel_order(symbol,pos["sl_order_id"])
-                                r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=pos["size"],price=new_sl,order_type="stop",reduce_only=True)
-                                pos["sl_order_id"]=r.get("order_id"); self._save_state()
-                            except Exception as e: logger.error(f"Trailing SL {symbol}: {e}")
+                                self.hl.cancel_order(symbol, pos["sl_order_id"])
+                                r = self.hl.place_order(symbol=symbol, is_buy=not is_long, size=pos["size"], price=new_sl, order_type="stop", reduce_only=True)
+                                pos["sl_order_id"] = r.get("order_id")
+                                self._save_state()
+                            except Exception as e:
+                                logger.error(f"Trailing SL {symbol}: {e}")
 
     def _get_atr(self, symbol, period=14):
         try:
@@ -440,49 +627,132 @@ class HyperTraderAgent:
         except: return 0
 
     def _close_position(self, symbol, pos, exit_price, reason):
-        is_long  = pos["direction"]=="LONG"
-        pnl_pct  = ((exit_price-pos["entry"])/pos["entry"]*100) if is_long else ((pos["entry"]-exit_price)/pos["entry"]*100)
-        pnl_lev  = pnl_pct*pos["leverage"]
-        pnl_usd  = (pnl_pct/100)*pos["equity_open"]
+        is_long = pos["direction"] == "LONG"
+        entry   = float(pos.get("entry", 0) or exit_price)
+        pnl_pct = ((exit_price-entry)/entry*100) if is_long else ((entry-exit_price)/entry*100)
+        pnl_lev = pnl_pct * pos["leverage"]
+        pnl_usd = (pnl_pct/100) * pos["equity_open"]
         try:
-            opened=datetime.fromisoformat(pos["opened_at"].replace("Z","").replace("+00:00",""))
-            dur_min=round((datetime.now(timezone.utc)-opened.replace(tzinfo=timezone.utc)).total_seconds()/60)
-        except: dur_min=0
+            opened  = datetime.fromisoformat(pos["opened_at"].replace("Z","").replace("+00:00",""))
+            dur_min = round((datetime.now(timezone.utc)-opened.replace(tzinfo=timezone.utc)).total_seconds()/60)
+        except:
+            dur_min = 0
+
         if not CONFIG["dry_run"]:
             for k in ("sl_order_id","tp1_order_id","tp2_order_id"):
-                oid=pos.get(k)
+                oid = pos.get(k)
                 if oid:
-                    try: self.hl.cancel_order(symbol,oid)
+                    try: self.hl.cancel_order(symbol, oid)
                     except: pass
-            try: self.hl.close_position(symbol,pos["size"],is_long)
+            try: self.hl.close_position(symbol, pos["size"], is_long)
             except Exception as e: logger.error(f"close {symbol}: {e}")
-        em="✅" if pnl_usd>=0 else "❌"
-        self._notify(f"{em} <b>SAIDA — {'LUCRO' if pnl_usd>=0 else 'PERDA'}</b>\n────────────────────\n"
-                     f"<code>{symbol}</code> {pos['direction']} {pos['leverage']}x | {reason} | {dur_min}min\n\n"
-                     f"Entrada: <code>${pos['entry']:,.4f}</code> → Saida: <code>${exit_price:,.4f}</code>\n"
-                     f"<b>Resultado: <code>{pnl_lev:+.2f}%</code> (<code>${pnl_usd:+.2f}</code>)</b>\n"
-                     f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
-        self.session_pnl+=pnl_usd; self.daily_pnl+=pnl_usd
-        if pnl_usd>=0: self.stats["wins"]+=1; self.stats["best"]=max(self.stats["best"],pnl_usd)
-        else:          self.stats["losses"]+=1; self.stats["worst"]=min(self.stats["worst"],pnl_usd)
-        self.trade_history.append({**pos,"symbol":symbol,"exit":exit_price,"exit_reason":reason,"pnl_usd":pnl_usd})
+
+            # Busca dados reais do fechamento via userFills
+            time.sleep(1)
+            try:
+                last = self.hl.get_last_fill(symbol)
+                if last and last.get("price", 0) > 0:
+                    exit_price = last["price"]
+                    real_fee   = last.get("fee", 0)
+                    real_pnl   = last.get("closed_pnl", pnl_usd)
+                    # Recalcula com preço real
+                    pnl_pct = ((exit_price-entry)/entry*100) if is_long else ((entry-exit_price)/entry*100)
+                    pnl_lev = pnl_pct * pos["leverage"]
+                    pnl_usd = real_pnl if real_pnl != 0 else pnl_usd
+                    logger.info(f"Close real: px={exit_price} fee=${real_fee} pnl=${pnl_usd}")
+            except Exception as e:
+                logger.error(f"fills close {symbol}: {e}")
+                real_fee = 0
+        else:
+            real_fee = 0
+
+        # Busca funding acumulado da posição
+        funding_usd = 0
+        if not CONFIG["dry_run"]:
+            try:
+                fs = self.hl.get_funding_summary(symbol)
+                funding_usd = fs.get("total_funding_usd", 0)
+            except Exception: pass
+
+        em = "✅" if pnl_usd >= 0 else "❌"
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        msg = (f"{em} <b>SAÍDA — {'LUCRO' if pnl_usd>=0 else 'PERDA'}</b>\n────────────────────\n"
+               f"<b>{symbol}</b> {pos['direction']} {pos['leverage']}x\n"
+               f"Motivo: <code>{reason}</code> | Duração: <code>{dur_min}min</code>\n\n"
+               f"📥 Entrada: <code>${entry:,.4f}</code>\n"
+               f"📤 Saída:   <code>${exit_price:,.4f}</code>\n\n"
+               f"<b>Resultado: <code>{pnl_lev:+.2f}%</code> (<code>${pnl_usd:+.2f}</code>)</b>\n")
+        if real_fee:
+            msg += f"💸 Fee pago: <code>${real_fee:.4f}</code>\n"
+        if funding_usd:
+            em_f = "📈" if funding_usd >= 0 else "📉"
+            msg += f"{em_f} Funding: <code>${funding_usd:+.4f}</code>\n"
+        msg += f"\n🕐 {now}"
+        self._notify(msg)
+
+        self.session_pnl += pnl_usd
+        self.daily_pnl   += pnl_usd
+        if pnl_usd >= 0:
+            self.stats["wins"]  += 1
+            self.stats["best"]   = max(self.stats["best"], pnl_usd)
+        else:
+            self.stats["losses"] += 1
+            self.stats["worst"]  = min(self.stats["worst"], pnl_usd)
+
+        self.trade_history.append({
+            **pos, "symbol": symbol, "exit": exit_price,
+            "exit_reason": reason, "pnl_usd": pnl_usd,
+            "fee": real_fee, "duration_min": dur_min,
+            "closed_at": datetime.now(timezone.utc).isoformat()
+        })
         del self.active_positions[symbol]
         self._save_state()
 
     def notify_pnl_update(self):
         if not self.active_positions: return
-        total=self.stats["total"]; wr=round(self.stats["wins"]/total*100,1) if total>0 else 0
-        unr=0.0; lines=[f"📊 <b>UPDATE {datetime.now(timezone.utc).strftime('%H:%M UTC')}</b>","────────────────────"]
-        for sym,pos in self.active_positions.items():
-            cur=self.hl.get_mark_price(sym); il=pos["direction"]=="LONG"
-            pp=((cur-pos["entry"])/pos["entry"]*100) if il else ((pos["entry"]-cur)/pos["entry"]*100)
-            pl=pp*pos["leverage"]; pu=(pp/100)*pos["equity_open"]; unr+=pu
-            em="🟢" if pu>=0 else "🔴"
-            lines.append(f"{em} <b>{sym}</b> {'LONG' if il else 'SHORT'} {pos['leverage']}x\n"
-                         f"  <code>${pos['entry']:,.2f}</code>→<code>${cur:,.2f}</code> <code>{pl:+.2f}%</code> (<code>${pu:+.2f}</code>)")
-        lines+=["────────────────────",f"Nao realizado: <code>${unr:+.2f}</code>",
-                f"Realizado hoje: <code>${self.daily_pnl:+.2f}</code>",
-                f"Win Rate: <code>{wr}%</code> ({self.stats['wins']}W/{self.stats['losses']}L)"]
+        total = self.stats["total"]
+        wr    = round(self.stats["wins"]/total*100,1) if total>0 else 0
+        unr   = 0.0
+        now   = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+
+        # Busca P&L real da exchange
+        real_pnls = {}
+        if not CONFIG["dry_run"]:
+            try:
+                acc = self.hl.get_account_info()
+                for p in acc.get("positions",[]):
+                    pd  = p.get("position",{})
+                    sym = pd.get("coin","")
+                    real_pnls[sym] = float(pd.get("unrealizedPnl",0) or 0)
+            except Exception: pass
+
+        lines = [f"📊 <b>UPDATE — {now}</b>", "────────────────────"]
+        for sym, pos in self.active_positions.items():
+            cur   = self.hl.get_mark_price(sym)
+            entry = float(pos.get("entry",0) or cur)
+            il    = pos["direction"]=="LONG"
+            pp    = ((cur-entry)/entry*100) if il else ((entry-cur)/entry*100)
+            pl    = pp*pos["leverage"]
+            pu    = real_pnls.get(sym, (pp/100)*pos["equity_open"])
+            unr  += pu
+            em    = "🟢" if pu>=0 else "🔴"
+            sl    = float(pos.get("stop_loss",0) or 0)
+            tp1   = float(pos.get("tp1",0) or 0)
+            opened = pos.get("opened_at","")[:16].replace("T"," ")
+            lines.append(
+                f"{em} <b>{sym}</b> {'LONG' if il else 'SHORT'} {pos['leverage']}x\n"
+                f"  Entrada: <code>${entry:,.4f}</code> | Atual: <code>${cur:,.4f}</code>\n"
+                f"  P&L: <code>{pl:+.2f}%</code> (<code>${pu:+.2f}</code>)\n"
+                f"  SL: <code>${sl:,.4f}</code> | TP1: <code>${tp1:,.4f}</code>\n"
+                f"  Aberto: <code>{opened} UTC</code>"
+            )
+        lines += [
+            "────────────────────",
+            f"💰 Não realizado: <code>${unr:+.2f}</code>",
+            f"💵 Realizado hoje: <code>${self.daily_pnl:+.2f}</code>",
+            f"📈 Win Rate: <code>{wr}%</code> ({self.stats['wins']}W/{self.stats['losses']}L)",
+            f"🕐 {now}"
+        ]
         self._notify("\n".join(lines))
 
     def generate_daily_report(self) -> str:

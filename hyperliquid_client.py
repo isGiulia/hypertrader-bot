@@ -1,11 +1,21 @@
 """
-Hyperliquid API Client
-Interface com a API da Hyperliquid — assinatura EIP-712 via SDK oficial
+Hyperliquid API Client — v2
+Interface completa com a API da Hyperliquid
+- Assinatura EIP-712 via SDK oficial
+- userFills: preço real, fee, P&L fechado, timestamp
+- userFunding: funding acumulado por posição
+- historicalOrders: histórico completo de ordens
+- orderStatus: status individual de ordem
+- metaAndAssetCtxs: dados de mercado em batch (1 request)
+- Tick/lot size: arredondamento correto de preços e sizes
 """
 
 import time
-import requests
 import logging
+from datetime import datetime, timezone
+from math import log10, floor
+
+import requests
 
 logger = logging.getLogger("HyperliquidClient")
 
@@ -23,16 +33,22 @@ class HyperliquidClient:
         self.session        = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
 
-        self._exchange = None
-        self._info     = None
+        self._exchange   = None
+        self._info       = None
+        self._asset_info = {}   # cache: sym -> metadados
+
         if private_key:
             self._init_sdk()
+
+    # ══════════════════════════════════════════════
+    #  SDK
+    # ══════════════════════════════════════════════
 
     def _init_sdk(self):
         try:
             from hyperliquid.exchange import Exchange
-            from hyperliquid.info import Info
-            from eth_account import Account
+            from hyperliquid.info     import Info
+            from eth_account          import Account
 
             account        = Account.from_key(self.private_key)
             self._exchange = Exchange(
@@ -41,11 +57,9 @@ class HyperliquidClient:
             )
             self._info = Info(self.base_url, skip_ws=True)
             logger.info("SDK hyperliquid-python-sdk inicializado (EIP-712)")
+            self._load_asset_info()
         except ImportError as e:
-            logger.error(
-                f"SDK nao instalado: {e}\n"
-                "Execute: pip install git+https://github.com/hyperliquid-dex/hyperliquid-python-sdk.git eth-account"
-            )
+            logger.error(f"SDK nao instalado: {e}")
         except Exception as e:
             logger.error(f"Erro ao inicializar SDK: {e}")
 
@@ -53,11 +67,68 @@ class HyperliquidClient:
     #  HTTP interno
     # ══════════════════════════════════════════════
 
-    def _post(self, endpoint: str, payload: dict) -> dict:
+    def _post(self, endpoint: str, payload: dict, timeout: int = 10) -> dict:
         url  = f"{self.base_url}/{endpoint}"
-        resp = self.session.post(url, json=payload, timeout=10)
+        resp = self.session.post(url, json=payload, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
+
+    # ══════════════════════════════════════════════
+    #  ASSET INFO + TICK/LOT SIZE
+    # ══════════════════════════════════════════════
+
+    def _load_asset_info(self):
+        """Carrega metadados de todos os assets em 1 request (metaAndAssetCtxs)."""
+        try:
+            r    = self._post("info", {"type": "metaAndAssetCtxs"})
+            meta = r[0] if isinstance(r, list) and len(r) > 0 else {}
+            ctxs = r[1] if isinstance(r, list) and len(r) > 1 else []
+
+            for idx, asset in enumerate(meta.get("universe", [])):
+                name = asset.get("name", "")
+                ctx  = ctxs[idx] if idx < len(ctxs) else {}
+                self._asset_info[name] = {
+                    "index":        idx,
+                    "szDecimals":   int(asset.get("szDecimals", 4)),
+                    "maxLeverage":  int(asset.get("maxLeverage", 20)),
+                    "onlyIsolated": asset.get("onlyIsolated", False),
+                    "markPx":       float(ctx.get("markPx", 0) or 0),
+                    "funding":      float(ctx.get("funding", 0) or 0),
+                    "openInterest": float(ctx.get("openInterest", 0) or 0),
+                }
+            logger.info(f"Asset info: {len(self._asset_info)} assets carregados")
+        except Exception as e:
+            logger.error(f"_load_asset_info: {e}")
+
+    def get_asset_info(self) -> dict:
+        if not self._asset_info:
+            self._load_asset_info()
+        return self._asset_info
+
+    def get_max_leverage(self, symbol: str) -> int:
+        return self.get_asset_info().get(symbol.upper(), {}).get("maxLeverage", 20)
+
+    def get_sz_decimals(self, symbol: str) -> int:
+        return self.get_asset_info().get(symbol, {}).get("szDecimals", 4)
+
+    def round_size(self, symbol: str, size: float) -> float:
+        """Arredonda size para o lot size correto da Hyperliquid."""
+        decimals = self.get_sz_decimals(symbol)
+        return round(float(size), decimals)
+
+    def round_price(self, price: float) -> float:
+        """
+        Arredonda preço seguindo a regra da Hyperliquid:
+        máximo 5 algarismos significativos.
+        """
+        if price <= 0:
+            return price
+        try:
+            magnitude = floor(log10(abs(price)))
+            factor    = 10 ** (4 - magnitude)
+            return round(round(price * factor) / factor, max(0, 4 - magnitude))
+        except Exception:
+            return round(price, 2)
 
     # ══════════════════════════════════════════════
     #  MARKET DATA
@@ -71,6 +142,12 @@ class HyperliquidClient:
             return {}
 
     def get_mark_price(self, symbol: str) -> float:
+        try:
+            info = self.get_asset_info()
+            if symbol in info and info[symbol].get("markPx", 0) > 0:
+                return float(info[symbol]["markPx"])
+        except Exception:
+            pass
         return float(self.get_all_mids().get(symbol, 0))
 
     def get_meta(self) -> dict:
@@ -106,14 +183,13 @@ class HyperliquidClient:
 
     def get_funding_rate(self, symbol: str) -> dict:
         try:
-            meta = self.get_meta()
-            for asset in meta.get("universe", []):
-                if asset.get("name") == symbol:
-                    return {
-                        "funding_rate":  float(asset.get("funding", 0)),
-                        "open_interest": float(asset.get("openInterest", 0)),
-                        "mark_price":    float(asset.get("markPx", 0)),
-                    }
+            info = self.get_asset_info()
+            if symbol in info:
+                return {
+                    "funding_rate":  info[symbol].get("funding", 0),
+                    "open_interest": info[symbol].get("openInterest", 0),
+                    "mark_price":    info[symbol].get("markPx", 0),
+                }
         except Exception:
             pass
         return {"funding_rate": 0, "open_interest": 0, "mark_price": 0}
@@ -126,7 +202,7 @@ class HyperliquidClient:
             return []
 
     # ══════════════════════════════════════════════
-    #  ACCOUNT — com suporte a conta unificada
+    #  ACCOUNT
     # ══════════════════════════════════════════════
 
     def get_account_info(self) -> dict:
@@ -137,14 +213,9 @@ class HyperliquidClient:
             equity = float(r.get("marginSummary", {}).get("accountValue", 0))
             margin = float(r.get("marginSummary", {}).get("totalMarginUsed", 0))
 
-            # Conta unificada (testnet): se equity==0, saldo esta no Spot
-            # A API retorna marginSummary zerado quando nao ha posicoes abertas em perps
             if equity == 0:
                 try:
-                    spot = self._post("info", {
-                        "type": "spotClearinghouseState",
-                        "user": self.wallet_address
-                    })
+                    spot = self._post("info", {"type": "spotClearinghouseState", "user": self.wallet_address})
                     for bal in spot.get("balances", []):
                         if bal.get("coin") == "USDC":
                             equity = float(bal.get("total", 0))
@@ -171,6 +242,152 @@ class HyperliquidClient:
         except Exception:
             return []
 
+    def get_all_positions(self) -> dict:
+        """Retorna todas as posições abertas como dict sym -> dados."""
+        result = {}
+        try:
+            acc = self.get_account_info()
+            for p in acc.get("positions", []):
+                pd  = p.get("position", {})
+                sym = pd.get("coin", "")
+                sz  = float(pd.get("szi", 0))
+                if abs(sz) < 0.0001:
+                    continue
+                lev_raw = pd.get("leverage", {})
+                lev     = float(lev_raw.get("value", 1) if isinstance(lev_raw, dict) else lev_raw or 1)
+                result[sym] = {
+                    "is_long":        sz > 0,
+                    "size":           abs(sz),
+                    "entry_price":    float(pd.get("entryPx", 0) or 0),
+                    "unrealized_pnl": float(pd.get("unrealizedPnl", 0) or 0),
+                    "liq_price":      float(pd.get("liquidationPx", 0) or 0),
+                    "margin_used":    float(pd.get("marginUsed", 0) or 0),
+                    "leverage":       lev,
+                }
+        except Exception as e:
+            logger.error(f"get_all_positions: {e}")
+        return result
+
+    # ══════════════════════════════════════════════
+    #  USER FILLS — preço real, fee, P&L, timestamp
+    # ══════════════════════════════════════════════
+
+    def get_user_fills(self, symbol: str = None) -> list:
+        """
+        Ordens preenchidas com detalhes completos:
+          px, sz, side, time, fee, closedPnl, dir, oid, tid
+        """
+        if not self.wallet_address:
+            return []
+        try:
+            r     = self._post("info", {"type": "userFills", "user": self.wallet_address})
+            fills = r if isinstance(r, list) else []
+            if symbol:
+                fills = [f for f in fills if f.get("coin") == symbol]
+            return sorted(fills, key=lambda x: x.get("time", 0), reverse=True)
+        except Exception as e:
+            logger.error(f"get_user_fills: {e}")
+            return []
+
+    def get_last_fill(self, symbol: str) -> dict:
+        """Fill mais recente de um símbolo com todos os detalhes."""
+        fills = self.get_user_fills(symbol)
+        if not fills:
+            return {}
+        f  = fills[0]
+        ts = datetime.fromtimestamp(f.get("time", 0) / 1000, tz=timezone.utc)
+        return {
+            "price":        float(f.get("px", 0)),
+            "size":         float(f.get("sz", 0)),
+            "side":         "BUY" if f.get("side") == "B" else "SELL",
+            "fee":          float(f.get("fee", 0)),
+            "closed_pnl":   float(f.get("closedPnl", 0)),
+            "direction":    f.get("dir", ""),
+            "order_id":     f.get("oid"),
+            "trade_id":     f.get("tid"),
+            "timestamp":    ts.strftime("%d/%m %H:%M:%S UTC"),
+            "timestamp_ms": f.get("time", 0),
+        }
+
+    def get_fills_summary(self, symbol: str = None) -> dict:
+        """Resumo: total fees, P&L realizado, contagem de trades."""
+        fills     = self.get_user_fills(symbol)
+        total_fee = sum(float(f.get("fee", 0)) for f in fills)
+        total_pnl = sum(float(f.get("closedPnl", 0)) for f in fills)
+        return {
+            "total_trades": len(fills),
+            "opens":        len([f for f in fills if "Open"  in f.get("dir", "")]),
+            "closes":       len([f for f in fills if "Close" in f.get("dir", "")]),
+            "total_fee":    round(total_fee, 4),
+            "total_pnl":    round(total_pnl, 4),
+        }
+
+    # ══════════════════════════════════════════════
+    #  HISTORICAL ORDERS
+    # ══════════════════════════════════════════════
+
+    def get_historical_orders(self, symbol: str = None) -> list:
+        """Histórico completo de ordens: preenchidas, canceladas, abertas."""
+        if not self.wallet_address:
+            return []
+        try:
+            r      = self._post("info", {"type": "historicalOrders", "user": self.wallet_address})
+            orders = r if isinstance(r, list) else []
+            if symbol:
+                orders = [o for o in orders if o.get("order", {}).get("coin") == symbol]
+            return orders
+        except Exception as e:
+            logger.error(f"get_historical_orders: {e}")
+            return []
+
+    def get_order_status(self, order_id: int) -> dict:
+        """Status de uma ordem específica: open / filled / canceled."""
+        if not self.wallet_address or not order_id:
+            return {}
+        try:
+            return self._post("info", {
+                "type": "orderStatus",
+                "user": self.wallet_address,
+                "oid":  order_id
+            }) or {}
+        except Exception as e:
+            logger.error(f"get_order_status {order_id}: {e}")
+            return {}
+
+    # ══════════════════════════════════════════════
+    #  USER FUNDING
+    # ══════════════════════════════════════════════
+
+    def get_user_funding(self, lookback_hours: int = 24) -> list:
+        """Funding pago/recebido nas últimas N horas."""
+        if not self.wallet_address:
+            return []
+        try:
+            end_time   = int(time.time() * 1000)
+            start_time = end_time - (lookback_hours * 3_600_000)
+            r = self._post("info", {
+                "type":      "userFunding",
+                "user":      self.wallet_address,
+                "startTime": start_time,
+                "endTime":   end_time,
+            })
+            return r if isinstance(r, list) else []
+        except Exception as e:
+            logger.error(f"get_user_funding: {e}")
+            return []
+
+    def get_funding_summary(self, symbol: str = None) -> dict:
+        """Total de funding pago/recebido nas últimas 24h."""
+        items = self.get_user_funding(24)
+        if symbol:
+            items = [i for i in items if i.get("delta", {}).get("coin") == symbol]
+        total = sum(float(i.get("delta", {}).get("usdc", 0)) for i in items)
+        return {
+            "total_funding_usd": round(total, 4),
+            "count":             len(items),
+            "received":          total >= 0,
+        }
+
     # ══════════════════════════════════════════════
     #  ORDER EXECUTION — via SDK oficial (EIP-712)
     # ══════════════════════════════════════════════
@@ -188,29 +405,51 @@ class HyperliquidClient:
         if not self._exchange:
             raise RuntimeError("SDK nao inicializado")
 
+        size  = self.round_size(symbol, float(size))
+        price = float(price)
+
         if order_type == "market":
-            # Hyperliquid nao tem market order puro — usa limit IOC com slippage de 0.5%
             slippage = 0.005
-            price = price * (1 + slippage) if is_buy else price * (1 - slippage)
-            price = round(price, 6)
-            ot_sdk = {"limit": {"tif": "Ioc"}}
+            price    = price * (1 + slippage) if is_buy else price * (1 - slippage)
+            price    = self.round_price(price)
+            ot_sdk   = {"limit": {"tif": "Ioc"}}
         elif order_type == "stop":
+            price  = self.round_price(price)
             ot_sdk = {"trigger": {
                 "isMarket":  True,
-                "triggerPx": str(round(price, 6)),
+                "triggerPx": str(price),
                 "tpsl":      "sl"
             }}
         else:
+            price  = self.round_price(price)
             ot_sdk = {"limit": {"tif": tif}}
 
+        logger.info(f"Ordem: {symbol} {'BUY' if is_buy else 'SELL'} sz={size} px={price} [{order_type}]")
         result = self._exchange.order(symbol, is_buy, size, price, ot_sdk, reduce_only=reduce_only)
 
         if result.get("status") == "ok":
             statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
-            order_id = (statuses[0].get("resting", {}).get("oid") or
-                        statuses[0].get("filled",  {}).get("oid"))
-            logger.info(f"Ordem OK: {symbol} {'BUY' if is_buy else 'SELL'} {size} @ {price} oid={order_id}")
-            return {"status": "ok", "order_id": order_id, "raw": result}
+            status_0 = statuses[0] if statuses else {}
+            filled   = status_0.get("filled",  {})
+            resting  = status_0.get("resting", {})
+            order_id = filled.get("oid") or resting.get("oid")
+
+            filled_sz = float(filled.get("totalSz", 0) or 0)
+            avg_px    = float(filled.get("avgPx", price) or price)
+            is_filled = filled_sz > 0
+
+            logger.info(
+                f"Ordem OK oid={order_id} "
+                f"{'FILLED avgPx=' + str(avg_px) + ' sz=' + str(filled_sz) if is_filled else 'RESTING'}"
+            )
+            return {
+                "status":    "ok",
+                "order_id":  order_id,
+                "filled":    is_filled,
+                "filled_sz": filled_sz,
+                "avg_px":    avg_px if is_filled else price,
+                "raw":       result,
+            }
         else:
             logger.error(f"Ordem falhou: {result}")
             return {"status": "error", "raw": result}
@@ -218,36 +457,31 @@ class HyperliquidClient:
     def cancel_order(self, symbol: str, order_id: int) -> dict:
         if not self._exchange:
             raise RuntimeError("SDK nao inicializado")
-        return self._exchange.cancel(symbol, order_id)
+        try:
+            return self._exchange.cancel(symbol, order_id)
+        except Exception as e:
+            logger.error(f"cancel_order {symbol} {order_id}: {e}")
+            return {"status": "error", "error": str(e)}
+
+    def cancel_all_orders(self, symbol: str = None) -> int:
+        """Cancela todas as ordens abertas. Retorna quantidade cancelada."""
+        orders   = self.get_open_orders()
+        canceled = 0
+        for o in orders:
+            if symbol and o.get("coin") != symbol:
+                continue
+            try:
+                self.cancel_order(o.get("coin"), o.get("oid"))
+                canceled += 1
+            except Exception as e:
+                logger.error(f"cancel_all {o.get('coin')} {o.get('oid')}: {e}")
+        return canceled
 
     def close_position(self, symbol: str, size: float, is_long: bool) -> dict:
         price     = self.get_mark_price(symbol)
-        slippage  = 0.002
+        slippage  = 0.003
         lim_price = price * (1 - slippage) if is_long else price * (1 + slippage)
         return self.place_order(
             symbol=symbol, is_buy=not is_long, size=size,
             price=lim_price, order_type="market", reduce_only=True
         )
-
-    # ══════════════════════════════════════════════
-    #  ASSET INFO
-    # ══════════════════════════════════════════════
-
-    def get_asset_info(self) -> dict:
-        try:
-            meta   = self.get_meta()
-            result = {}
-            for idx, asset in enumerate(meta.get("universe", [])):
-                name = asset.get("name", "")
-                result[name] = {
-                    "index":        idx,
-                    "maxLeverage":  int(asset.get("maxLeverage", 20)),
-                    "szDecimals":   int(asset.get("szDecimals", 4)),
-                    "onlyIsolated": asset.get("onlyIsolated", False),
-                }
-            return result
-        except Exception:
-            return {}
-
-    def get_max_leverage(self, symbol: str) -> int:
-        return self.get_asset_info().get(symbol.upper(), {}).get("maxLeverage", 20)
