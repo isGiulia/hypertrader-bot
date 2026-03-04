@@ -2,7 +2,7 @@
 
 Bot autônomo de trading de perpetuals na **Hyperliquid** usando **Claude AI** como motor de análise técnica e macro.
 
-Analisa BTC, ETH, SOL, AVAX e PEPE a cada 30 minutos, toma decisões de LONG/SHORT baseadas em indicadores técnicos + Fear & Greed Index + Dominância do BTC, e envia todas as notificações via Telegram.
+Analisa BTC, ETH, SOL e AVAX a cada 30 minutos, toma decisões de LONG/SHORT baseadas em indicadores técnicos + Fear & Greed Index + Dominância do BTC, e envia todas as notificações via Telegram.
 
 ---
 
@@ -99,7 +99,7 @@ Salvar: `Ctrl+O` → Enter → `Ctrl+X`
 
 ```bash
 source .venv/bin/activate
-nohup python main.py auto > bot.log 2>&1 &
+nohup python hypertrader/main.py auto > bot.log 2>&1 &
 ```
 
 ### Ver os logs em tempo real
@@ -120,7 +120,7 @@ pkill -9 -f python
 pkill -9 -f python
 git pull origin master
 source .venv/bin/activate
-nohup python main.py auto > bot.log 2>&1 &
+nohup python hypertrader/main.py auto > bot.log 2>&1 &
 sleep 3 && tail -f bot.log
 ```
 
@@ -188,18 +188,76 @@ Após iniciar o bot, envie esses comandos para ele no Telegram:
 
 ## ⚙️ Configurações principais
 
-Todas no `main.py` dentro do dicionário `CONFIG`:
+Todas as configurações ficam em `hypertrader/config.py`:
 
 | Configuração | Padrão | Descrição |
 |---|---|---|
-| `symbols` | BTC, ETH, SOL, AVAX, PEPE | Pares analisados |
-| `max_positions` | 5 | Máximo de posições abertas |
-| `max_leverage` | 10x | Alavancagem máxima permitida |
-| `max_trades_day` | 3 | Limite de trades por dia |
-| `risk_per_trade` | 2.5% | Risco máximo por operação |
-| `min_confidence` | 75% | Confiança mínima para entrar |
-| `daily_loss_limit` | 6% | Stop diário automático |
-| `analysis_interval` | 1800s | Intervalo entre análises (30min) |
+| `SYMBOLS` | BTC, ETH, SOL, AVAX | Pares analisados |
+| `MAX_POSITIONS` | 4 | Máximo de posições abertas |
+| `MAX_LEVERAGE` | 10x | Alavancagem máxima permitida |
+| `MAX_TRADES_DAY` | 6 | Limite de trades por dia |
+| `RISK_PER_TRADE` | 2% | Risco máximo por operação |
+| `MIN_CONFIDENCE` | 60% | Confiança mínima para entrar |
+| `DAILY_LOSS_LIMIT` | 6% | Stop diário automático |
+| `ANALYSIS_INTERVAL` | 1800s | Intervalo entre análises (30min) |
+| `MONITOR_FREQ` | 30s | Frequência de checagem de SL/TP |
+
+---
+
+## 📁 Estrutura dos arquivos
+
+O projeto segue os princípios do livro **Código Limpo (Clean Code)** de Robert C. Martin. Cada arquivo tem **uma única responsabilidade** e um nome que revela sua intenção. Nenhum módulo conhece os detalhes internos do outro — eles se comunicam por interfaces claras.
+
+```
+hypertrader-bot/
+│
+├── hypertrader/                        # Pacote principal do bot
+│   │
+│   ├── main.py                         # Ponto de entrada — só inicializa e delega
+│   ├── agent.py                        # Orquestrador — coordena todos os módulos
+│   ├── config.py                       # Todas as configurações num único lugar
+│   │
+│   ├── ai/                             # Inteligência artificial
+│   │   ├── claude_client.py            # Comunicação com a API do Claude (retry, histórico)
+│   │   └── prompts.py                  # System prompt do trader — separado do código
+│   │
+│   ├── core/                           # Lógica central de trading
+│   │   ├── trade_executor.py           # Executa ordens: entrada, SL, TP, fechamento
+│   │   ├── position_monitor.py         # Monitora posições: SL/TP, trailing, liquidação
+│   │   ├── signal_validator.py         # Valida geometria do sinal (SL abaixo/acima da entrada)
+│   │   └── state_manager.py            # Salva e carrega estado em disco (state.json)
+│   │
+│   ├── exchange/
+│   │   └── hyperliquid_client.py       # API da Hyperliquid: ordens, fills, funding, posições
+│   │
+│   └── notifications/
+│       └── messages.py                 # Construtores de mensagens Telegram (funções puras)
+│
+├── market_analyzer.py                  # Análise técnica: RSI, MACD, Bollinger, ATR, etc.
+├── risk_manager.py                     # Gestão de risco: tamanho, R:R, drawdown
+├── telegram_bot.py                     # Interface Telegram: comandos e notificações
+├── requirements.txt                    # Dependências Python
+├── .env                                # ⚠️ Suas credenciais — NUNCA suba para o GitHub
+├── state.json                          # Estado salvo automaticamente (posições, P&L)
+└── logs/
+    └── hypertrader.log                 # Log completo de tudo que o bot faz
+```
+
+### Por que essa estrutura?
+
+| Módulo | Responsabilidade única |
+|--------|------------------------|
+| `main.py` | Inicializar componentes e chamar `run_autonomous()`. Nada mais. |
+| `agent.py` | Coordenar os módulos. Não implementa lógica — delega tudo. |
+| `config.py` | Ser a **única fonte da verdade** para todas as configurações. Nenhum outro arquivo define constantes de trading. |
+| `ai/claude_client.py` | Toda a lógica de chamada à API: retry, backoff, histórico de conversa. O resto do sistema não sabe como o Claude funciona. |
+| `ai/prompts.py` | Prompts são **dados**, não código. Ficam separados para editar sem tocar na lógica. |
+| `core/trade_executor.py` | Enviar ordens para a exchange. Não sabe nada sobre Telegram, Claude ou estado. |
+| `core/position_monitor.py` | Reagir a eventos nas posições: fill, SL, TP1, TP2, trailing. Não executa ordens diretamente. |
+| `core/signal_validator.py` | Verificar se o sinal faz sentido geometricamente. Uma função, um propósito. |
+| `core/state_manager.py` | Persistir e recuperar estado. Usa arquivo temporário + replace atômico para nunca corromper o `state.json`. |
+| `exchange/hyperliquid_client.py` | Toda comunicação com a Hyperliquid API: mercado, ordens, fills reais, funding. |
+| `notifications/messages.py` | Construir as mensagens do Telegram como **funções puras** — sem efeitos colaterais, fáceis de testar e modificar. |
 
 ---
 
@@ -217,30 +275,12 @@ Todas no `main.py` dentro do dicionário `CONFIG`:
 
 ---
 
-## 📁 Estrutura dos arquivos
-
-```
-hypertrader-bot/
-├── main.py                 # Motor principal — loop, execução, Telegram
-├── market_analyzer.py      # Análise técnica: RSI, MACD, Bollinger, ATR, etc.
-├── hyperliquid_client.py   # Comunicação com a API da Hyperliquid (EIP-712)
-├── risk_manager.py         # Gestão de risco: tamanho, R:R, correlação
-├── telegram_bot.py         # Interface Telegram: comandos e notificações
-├── requirements.txt        # Dependências Python
-├── .env                    # ⚠️ Suas credenciais — NUNCA suba para o GitHub
-├── state.json              # Estado salvo automaticamente (posições, P&L)
-└── logs/
-    └── hypertrader.log     # Log completo de tudo que o bot faz
-```
-
----
-
 ## 🛠️ Solução de problemas
 
 **Bot não inicia:**
 ```bash
 source .venv/bin/activate
-python main.py auto
+python hypertrader/main.py auto
 # Ver o erro sem o nohup para debugar
 ```
 
