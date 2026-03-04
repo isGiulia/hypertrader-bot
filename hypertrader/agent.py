@@ -35,7 +35,16 @@ class HyperTraderAgent:
         from market_analyzer import MarketAnalyzer
         from risk_manager    import RiskManager
         self._analyzer     = MarketAnalyzer(self._hl)
-        self._risk         = RiskManager(vars(config))
+        self._risk = RiskManager({
+            "drawdown_stop":      config.DRAWDOWN_STOP,
+            "drawdown_half":      config.DRAWDOWN_HALF,
+            "trading_allocation": 1.0,
+            "risk_per_trade":     config.RISK_PER_TRADE,
+            "max_positions":      config.MAX_POSITIONS,
+            "daily_loss_limit":   config.DAILY_LOSS_LIMIT,
+            "min_confidence":     config.MIN_CONFIDENCE,
+            "take_profit_ratio":  config.TAKE_PROFIT_RATIO,
+        })
 
         # ── Estado
         self._state        = self._state_mgr.load()
