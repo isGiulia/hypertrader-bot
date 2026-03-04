@@ -125,8 +125,8 @@ class TelegramBot:
 
     @auth
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        from main import CONFIG
-        syms = CONFIG["symbols"]
+        
+        syms = config.SYMBOLS
         # Gera botoes de analise dinamicamente com os simbolos reais do CONFIG
         analyze_btns = [
             InlineKeyboardButton(f"🔍 {s}", callback_data=f"analisar_{s}")
@@ -148,8 +148,8 @@ class TelegramBot:
             [InlineKeyboardButton("⏸ Pausar",     callback_data="pausar"),
              InlineKeyboardButton("▶️ Retomar",    callback_data="retomar")],
         ]
-        modo = "LIVE 🔴" if not CONFIG["dry_run"] else "DRY RUN 🔵"
-        rede = "MAINNET" if not CONFIG["use_testnet"] else "TESTNET"
+        modo = "LIVE 🔴" if not config.DRY_RUN else "DRY RUN 🔵"
+        rede = "MAINNET" if not config.USE_TESTNET else "TESTNET"
         await update.message.reply_text(
             f"🤖 <b>HyperTrader AI</b>\n"
             f"────────────────────\n"
@@ -224,21 +224,21 @@ class TelegramBot:
 
     @auth
     async def cmd_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        from main import CONFIG
-        lev_map = CONFIG.get("leverage_map", {})
+        
+        lev_map = config.LEVERAGE_MAP
         lev_str = " | ".join(f"{k}={v}x" for k, v in lev_map.items())
         await update.message.reply_text(
             f"⚙️ <b>Configuracao Atual</b>\n"
             f"────────────────────\n"
-            f"🌐 Rede: <code>{'MAINNET' if not CONFIG['use_testnet'] else 'TESTNET'}</code>\n"
-            f"⚙️ Modo: <code>{'LIVE 🔴' if not CONFIG['dry_run'] else 'DRY RUN 🔵'}</code>\n"
-            f"🎯 Pares: <code>{', '.join(CONFIG['symbols'])}</code>\n"
-            f"📊 Max posicoes: <code>{CONFIG['max_positions']}</code>\n"
-            f"💰 Risco/trade: <code>{CONFIG['risk_per_trade']*100:.1f}%</code>\n"
-            f"🛑 Stop diario: <code>{CONFIG['daily_loss_limit']*100:.0f}%</code>\n"
-            f"🛡️ Drawdown half: <code>{CONFIG['drawdown_half']}%</code> | stop: <code>{CONFIG['drawdown_stop']}%</code>\n"
-            f"⏱ Intervalo: <code>{CONFIG['analysis_interval']}s</code>\n"
-            f"🤖 Confianca minima: <code>{CONFIG['min_confidence']}%</code>\n"
+            f"🌐 Rede: <code>{'MAINNET' if not config.USE_TESTNET else 'TESTNET'}</code>\n"
+            f"⚙️ Modo: <code>{'LIVE 🔴' if not config.DRY_RUN else 'DRY RUN 🔵'}</code>\n"
+            f"🎯 Pares: <code>{', '.join(config.SYMBOLS)}</code>\n"
+            f"📊 Max posicoes: <code>{config.MAX_POSITIONS}</code>\n"
+            f"💰 Risco/trade: <code>{config.RISK_PER_TRADE*100:.1f}%</code>\n"
+            f"🛑 Stop diario: <code>{config.DAILY_LOSS_LIMIT*100:.0f}%</code>\n"
+            f"🛡️ Drawdown half: <code>{config.DRAWDOWN_HALF}%</code> | stop: <code>{config.DRAWDOWN_STOP}%</code>\n"
+            f"⏱ Intervalo: <code>{config.ANALYSIS_INTERVAL}s</code>\n"
+            f"🤖 Confianca minima: <code>{config.MIN_CONFIDENCE}%</code>\n"
             f"🔢 Alavancagem: <code>{lev_str}</code>",
             parse_mode="HTML"
         )
@@ -249,10 +249,10 @@ class TelegramBot:
         try:
             lev_map = await asyncio.get_event_loop().run_in_executor(
                 None, self.agent.hl.get_asset_info)
-            from main import CONFIG
+            
             lines = ["🔢 <b>Alavancagem por Moeda</b>", "────────────────────"]
-            for sym in CONFIG["symbols"]:
-                configured   = CONFIG["leverage_map"].get(sym, CONFIG["leverage_fallback"])
+            for sym in config.SYMBOLS:
+                configured   = config.LEVERAGE_MAP.get(sym, config.LEVERAGE_FALLBACK)
                 platform_max = lev_map.get(sym, {}).get("maxLeverage", "?")
                 used = "🟢 " if sym in self.agent.active_positions else "   "
                 lines.append(f"{used}<code>{sym:<6}</code> configurado: <code>{configured}x</code> | plataforma: <code>{platform_max}x</code>")
@@ -318,26 +318,24 @@ class TelegramBot:
                 self.agent.paused = False
                 await q.edit_message_text("▶️ <b>Bot retomado!</b>", parse_mode="HTML")
             elif d == "config":
-                from main import CONFIG
-                lev_map = CONFIG.get("leverage_map", {})
-                lev_str = " | ".join(f"{k}={v}x" for k, v in lev_map.items())
+                lev_str = " | ".join(f"{k}={v}x" for k, v in config.LEVERAGE_MAP.items())
                 await q.edit_message_text(
                     f"⚙️ <b>Config</b>\n"
-                    f"Rede: <code>{'TESTNET' if CONFIG['use_testnet'] else 'MAINNET'}</code>\n"
-                    f"Modo: <code>{'DRY RUN' if CONFIG['dry_run'] else 'LIVE 🔴'}</code>\n"
-                    f"Pares: <code>{', '.join(CONFIG['symbols'])}</code>\n"
-                    f"Risco/trade: <code>{CONFIG['risk_per_trade']*100:.1f}%</code>\n"
-                    f"Max pos: <code>{CONFIG['max_positions']}</code>\n"
-                    f"Conf. minima: <code>{CONFIG['min_confidence']}%</code>\n"
+                    f"Rede: <code>{'TESTNET' if config.USE_TESTNET else 'MAINNET'}</code>\n"
+                    f"Modo: <code>{'DRY RUN' if config.DRY_RUN else 'LIVE 🔴'}</code>\n"
+                    f"Pares: <code>{', '.join(config.SYMBOLS)}</code>\n"
+                    f"Risco/trade: <code>{config.RISK_PER_TRADE*100:.1f}%</code>\n"
+                    f"Max pos: <code>{config.MAX_POSITIONS}</code>\n"
+                    f"Conf. minima: <code>{config.MIN_CONFIDENCE}%</code>\n"
                     f"Alavancagem: <code>{lev_str}</code>",
                     parse_mode="HTML")
             elif d == "alavancagem":
                 lev_map = await asyncio.get_event_loop().run_in_executor(
                     None, self.agent.hl.get_asset_info)
-                from main import CONFIG
+                
                 lines = ["🔢 <b>Alavancagem Maxima</b>", "────────────────────"]
-                for sym in CONFIG["symbols"]:
-                    configured   = CONFIG["leverage_map"].get(sym, CONFIG["leverage_fallback"])
+                for sym in config.SYMBOLS:
+                    configured   = config.LEVERAGE_MAP.get(sym, config.LEVERAGE_FALLBACK)
                     platform_max = lev_map.get(sym, {}).get("maxLeverage", "?")
                     used = "🟢 " if sym in self.agent.active_positions else "   "
                     lines.append(f"{used}<code>{sym:<5}</code> cfg: <code>{configured}x</code> plat: <code>{platform_max}x</code>")
@@ -379,7 +377,7 @@ class TelegramBot:
             equity = acc.get("equity", 0)
             margin = acc.get("margin_used", 0)
             free   = equity - margin
-            from main import CONFIG
+            
             total  = self.agent.stats["total"]
             wr     = round(self.agent.stats["wins"] / total * 100, 1) if total > 0 else 0
             dd_pct = self.agent.risk.get_drawdown_pct(equity)
@@ -387,14 +385,14 @@ class TelegramBot:
                 f"🤖 <b>HyperTrader — Status</b>\n"
                 f"────────────────────\n"
                 f"{'⏸ PAUSADO' if self.agent.paused else '✅ RODANDO'}\n"
-                f"🌐 <code>{'TESTNET' if CONFIG['use_testnet'] else 'MAINNET'}</code> | "
-                f"<code>{'DRY RUN' if CONFIG['dry_run'] else 'LIVE 🔴'}</code>\n\n"
+                f"🌐 <code>{'TESTNET' if config.USE_TESTNET else 'MAINNET'}</code> | "
+                f"<code>{'DRY RUN' if config.DRY_RUN else 'LIVE 🔴'}</code>\n\n"
                 f"💰 <b>Equity:</b> <code>${equity:,.2f}</code>\n"
                 f"📊 <b>Margin:</b> <code>${margin:,.2f}</code>\n"
                 f"🆓 <b>Livre:</b> <code>${free:,.2f}</code>\n"
                 f"📉 <b>Drawdown:</b> <code>{dd_pct:.1f}%</code>\n\n"
-                f"📈 <b>Posicoes:</b> <code>{len(self.agent.active_positions)}/{CONFIG['max_positions']}</code>\n"
-                f"🔢 <b>Trades hoje:</b> <code>{self.agent.daily_trades_count}/{CONFIG['max_trades_day']}</code>\n"
+                f"📈 <b>Posicoes:</b> <code>{len(self.agent.active_positions)}/{config.MAX_POSITIONS}</code>\n"
+                f"🔢 <b>Trades hoje:</b> <code>{self.agent.daily_trades_count}/{config.MAX_TRADES_DAY}</code>\n"
                 f"💵 <b>P&amp;L hoje:</b> <code>${self.agent.daily_pnl:+.2f}</code>\n"
                 f"💵 <b>P&amp;L sessao:</b> <code>${self.agent.session_pnl:+.2f}</code>\n"
                 f"🏆 <b>Win Rate:</b> <code>{wr}%</code> ({self.agent.stats['wins']}W/{self.agent.stats['losses']}L)\n"

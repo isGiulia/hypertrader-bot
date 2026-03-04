@@ -298,12 +298,16 @@ class HyperTraderAgent:
         total = self._state.stats["total"]
         wr    = round(self._state.stats["wins"] / total * 100, 1) if total > 0 else 0
         return self._claude.ask(
-            "Gere relatório executivo da sessão em português.",
+            "Gere um relatório executivo da sessão em português. "
+            "Responda em texto corrido, sem JSON, sem backticks, sem markdown. "
+            "Seja direto e objetivo como um trader profissional.",
             {
                 "session_pnl": self._state.session_pnl,
                 "total": total, "wr": f"{wr}%",
                 "wins": self._state.stats["wins"],
                 "losses": self._state.stats["losses"],
+                "best_trade": self._state.stats.get("best", 0),
+                "worst_trade": self._state.stats.get("worst", 0),
             },
             symbol="_report"
         )
