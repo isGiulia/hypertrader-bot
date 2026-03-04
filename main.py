@@ -32,7 +32,7 @@ CONFIG = {
     "leverage_map":        {"BTC":5,"ETH":5,"SOL":3,"AVAX":3,"PEPE":2},
     "max_leverage":        10,
     "leverage_fallback":   3,
-    "min_confidence":      65,
+    "min_confidence":      60,
     "take_profit_ratio":   1.5,
     "partial_tp_pct":      0.50,
     "trailing_stop":       True,
@@ -112,8 +112,7 @@ class HyperTraderAgent:
 
     def _save_state(self):
         try:
-            state = {"dry_run_mode":CONFIG["dry_run"],
-                     "active_positions":self.active_positions,"trade_history":self.trade_history[-100:],
+            state = {"active_positions":self.active_positions,"trade_history":self.trade_history[-100:],
                      "stats":self.stats,"session_pnl":self.session_pnl,"daily_pnl":self.daily_pnl,
                      "daily_trades_count":self.daily_trades_count,"peak_equity":self.risk.peak_equity,
                      "saved_at":datetime.now(timezone.utc).isoformat()}
@@ -126,20 +125,6 @@ class HyperTraderAgent:
         if not os.path.exists(STATE_FILE): return
         try:
             with open(STATE_FILE) as f: s=json.load(f)
-            # Detecta troca de modo (dry_run <-> live) e ignora posicoes fantasmas
-            saved_dry   = s.get("dry_run_mode", None)
-            current_dry = CONFIG["dry_run"]
-            if saved_dry is not None and saved_dry != current_dry:
-                logger.warning(f"Modo mudou (dry_run={saved_dry}->{current_dry}). Posicoes anteriores ignoradas.")
-                self._notify(
-                    f"⚠️ <b>Modo alterado</b> ({'DRY RUN' if saved_dry else 'LIVE'} → {'DRY RUN' if current_dry else 'LIVE'})\n"
-                    f"Posicoes anteriores ignoradas automaticamente.\n"
-                    f"Historico e stats preservados."
-                )
-                self.trade_history      = s.get("trade_history",[])
-                self.stats              = s.get("stats",self.stats)
-                self.risk.peak_equity   = s.get("peak_equity",0.0)
-                return
             self.active_positions   = s.get("active_positions",{})
             self.trade_history      = s.get("trade_history",[])
             self.stats              = s.get("stats",self.stats)
@@ -319,13 +304,6 @@ class HyperTraderAgent:
                     return {"status":"rejected","reason":str(res)}
 
                 entry_oid = res.get("order_id"); pos["entry_order_id"]=entry_oid
-
-                # Para market order: aguarda 2s e verifica fill imediato
-                if otype=="market":
-                    time.sleep(2)
-                    # preco real de entrada sera confirmado pelo monitor
-                    logger.info(f"Market order {symbol} enviada, oid={entry_oid}")
-
                 if otype=="limit":
                     time.sleep(3)
                     open_oids = [str(o.get("oid","")) for o in self.hl.get_open_orders()]
@@ -334,21 +312,6 @@ class HyperTraderAgent:
                         self.active_positions[symbol]=pos; self.stats["total"]+=1; self.daily_trades_count+=1
                         self._notify(f"⏳ <b>AGUARDANDO FILL — {symbol}</b>\nLimit @ <code>${entry:,.4f}</code>")
                         self._save_state(); return {"status":"pending_fill"}
-
-                # Confirma que a posicao existe na exchange antes de registrar
-                time.sleep(2)
-                real_positions = self.hl.get_account_info().get("positions", [])
-                real_coins = [p.get("position", {}).get("coin", "") for p in real_positions
-                              if float(p.get("position", {}).get("szi", 0)) != 0]
-                if symbol not in real_coins:
-                    logger.error(f"ORDEM NAO CONFIRMADA [{symbol}] — posicao nao encontrada na exchange apos execucao")
-                    self._notify(
-                        f"🚨 <b>ORDEM NAO CONFIRMADA — {symbol}</b>\n"
-                        f"A ordem foi enviada mas a posicao NAO aparece na exchange.\n"
-                        f"SL e TP NAO foram colocados.\n"
-                        f"Verifique manualmente em app.hyperliquid-testnet.xyz"
-                    )
-                    return {"status": "unconfirmed"}
 
                 pos = self._place_sl_tp(symbol, pos, size, is_buy, sl, tp1, tp2)
                 pos["status"]="open"
@@ -362,10 +325,9 @@ class HyperTraderAgent:
         self._save_state()
         em = "🟢" if direction=="LONG" else "🔴"
         simple=signal.get("reasoning_simples",""); ganho=signal.get("ganho_maximo",""); perda=signal.get("perda_maxima","")
-        sl_status = f"<code>${sl:,.4f}</code> (-{risk_pct:.2f}%)" if not CONFIG["dry_run"] and pos.get("sl_order_id") else f"<code>${sl:,.4f}</code> ⚠️ SL NAO COLOCADO"
-        msg=(f"{em} <b>ENTRADA CONFIRMADA — {direction}</b>\n────────────────────\n"
+        msg=(f"{em} <b>ENTRADA — {direction}</b>\n────────────────────\n"
              f"Par: <code>{symbol}/USDC</code>\nLev: <code>{leverage}x</code> | Conf: <code>{confidence}%</code>\n\n"
-             f"💵 Entrada: <code>${entry:,.4f}</code>\n🛑 SL: {sl_status}\n"
+             f"💵 Entrada: <code>${entry:,.4f}</code>\n🛑 SL: <code>${sl:,.4f}</code> (-{risk_pct:.2f}%)\n"
              f"🎯 TP1: <code>${tp1:,.4f}</code> (+{tp1_pct:.2f}%)\n🏆 TP2: <code>${tp2:,.4f}</code> (+{tp2_pct:.2f}%)\n\n"
              f"📐 R:R: <code>1:{rr_ratio}</code>\n")
         if ganho: msg+=f"💰 {ganho}\n"
@@ -376,32 +338,20 @@ class HyperTraderAgent:
         return {"status":"dry_run" if CONFIG["dry_run"] else "executed"}
 
     def _place_sl_tp(self, symbol, pos, size, is_buy, sl, tp1, tp2):
-        # Cast explicito para float — evita erro de formatacao no SDK
-        size = float(size)
-        sl   = float(sl)
-        tp1  = float(tp1)
-        tp2  = float(tp2)
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size,price=sl,order_type="stop",reduce_only=True)
             pos["sl_order_id"]=r.get("order_id")
-            logger.info(f"SL [{symbol}] colocado @ ${sl:.4f} oid={pos['sl_order_id']}")
         except Exception as e:
             logger.error(f"SL [{symbol}]: {e}")
-            self._notify(f"🚨 <b>ERRO SL — {symbol}</b>\nSL NAO colocado @ ${sl:.4f}\n<code>{str(e)[:150]}</code>\nFECHE MANUALMENTE se preco cair abaixo desse nivel!")
+            self._notify(f"🚨 ERRO SL — {symbol}: {e} — FECHE MANUALMENTE!")
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size*CONFIG["partial_tp_pct"],price=tp1,order_type="limit",reduce_only=True)
             pos["tp1_order_id"]=r.get("order_id")
-            logger.info(f"TP1 [{symbol}] colocado @ ${tp1:.4f} oid={pos['tp1_order_id']}")
-        except Exception as e:
-            logger.error(f"TP1 [{symbol}]: {e}")
-            self._notify(f"⚠️ <b>ERRO TP1 — {symbol}</b>\n<code>{str(e)[:150]}</code>")
+        except Exception as e: logger.error(f"TP1 [{symbol}]: {e}")
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size*(1-CONFIG["partial_tp_pct"]),price=tp2,order_type="limit",reduce_only=True)
             pos["tp2_order_id"]=r.get("order_id")
-            logger.info(f"TP2 [{symbol}] colocado @ ${tp2:.4f} oid={pos['tp2_order_id']}")
-        except Exception as e:
-            logger.error(f"TP2 [{symbol}]: {e}")
-            self._notify(f"⚠️ <b>ERRO TP2 — {symbol}</b>\n<code>{str(e)[:150]}</code>")
+        except Exception as e: logger.error(f"TP2 [{symbol}]: {e}")
         return pos
 
     # ── Monitor
@@ -416,7 +366,7 @@ class HyperTraderAgent:
                 if str(pos.get("entry_order_id","")) not in open_oids:
                     try:
                         is_buy=pos["direction"]=="LONG"
-                        pos=self._place_sl_tp(symbol,pos,float(pos["size"]),is_buy,float(pos["stop_loss"]),float(pos["tp1"]),float(pos["tp2"]))
+                        pos=self._place_sl_tp(symbol,pos,pos["size"],is_buy,pos["stop_loss"],pos["tp1"],pos["tp2"])
                         pos["status"]="open"; self.active_positions[symbol]=pos
                         self._notify(f"✅ <b>FILL — {symbol}</b>\nEntrada @ <code>${pos['entry']:,.4f}</code>. SL/TP colocados!")
                         self._save_state()
@@ -450,7 +400,7 @@ class HyperTraderAgent:
                 if not CONFIG["dry_run"] and pos.get("sl_order_id"):
                     try:
                         self.hl.cancel_order(symbol,pos["sl_order_id"])
-                        r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=float(pos["size"]),price=float(pos["entry"]),order_type="stop",reduce_only=True)
+                        r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=pos["size"],price=pos["entry"],order_type="stop",reduce_only=True)
                         pos["sl_order_id"]=r.get("order_id")
                     except Exception as e: logger.error(f"Breakeven SL {symbol}: {e}")
                 lev_pnl=pnl_pct*pos["leverage"]
@@ -467,7 +417,7 @@ class HyperTraderAgent:
                         if not CONFIG["dry_run"] and pos.get("sl_order_id"):
                             try:
                                 self.hl.cancel_order(symbol,pos["sl_order_id"])
-                                r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=float(pos["size"]),price=float(new_sl),order_type="stop",reduce_only=True)
+                                r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=pos["size"],price=new_sl,order_type="stop",reduce_only=True)
                                 pos["sl_order_id"]=r.get("order_id"); self._save_state()
                             except Exception as e: logger.error(f"Trailing SL {symbol}: {e}")
 
@@ -614,21 +564,7 @@ class HyperTraderAgent:
                     f"🏆 Win Rate: <code>{wr}%</code> ({self.stats['wins']}W/{self.stats['losses']}L)\n"
                     f"⏱ Proxima: <code>{prx_str}</code>")
                 logger.info(f"Ciclo | pos={len(self.active_positions)} | pnl=${self.session_pnl:+.2f} | prx={prx_str}")
-
-                # Monitora posicoes a cada 30s durante o intervalo de analise
-                # Garante que SL/TP sao checados frequentemente mesmo com intervalo longo
-                elapsed = 0
-                interval = CONFIG["analysis_interval"]
-                monitor_freq = min(30, interval)  # checa a cada 30s ou menos
-                while elapsed < interval:
-                    await asyncio.sleep(monitor_freq)
-                    elapsed += monitor_freq
-                    if self.active_positions:
-                        self.monitor_positions()
-                        pnl_tick += monitor_freq
-                        if pnl_tick >= CONFIG["pnl_update_interval"]:
-                            self.notify_pnl_update()
-                            pnl_tick = 0
+                await asyncio.sleep(CONFIG["analysis_interval"])
             except Exception as e:
                 logger.error(f"Erro loop: {e}", exc_info=True)
                 self._notify(f"🚨 <b>Erro loop</b>\n<code>{str(e)[:200]}</code>")

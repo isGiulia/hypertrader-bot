@@ -189,7 +189,11 @@ class HyperliquidClient:
             raise RuntimeError("SDK nao inicializado")
 
         if order_type == "market":
-            ot_sdk = {"market": {}}
+            # Hyperliquid nao tem market order puro — usa limit IOC com slippage de 0.5%
+            slippage = 0.005
+            price = price * (1 + slippage) if is_buy else price * (1 - slippage)
+            price = round(price, 6)
+            ot_sdk = {"limit": {"tif": "Ioc"}}
         elif order_type == "stop":
             ot_sdk = {"trigger": {
                 "isMarket":  True,
@@ -203,17 +207,9 @@ class HyperliquidClient:
 
         if result.get("status") == "ok":
             statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
-            st = statuses[0] if statuses else {}
-            # Hyperliquid retorna oid em resting (limit nao preenchida),
-            # filled (preenchida imediatamente) ou triggered (stop ativado)
-            order_id = (
-                st.get("resting", {}).get("oid") or
-                st.get("filled",  {}).get("oid") or
-                st.get("triggered", {}).get("oid") or
-                # Fallback: busca oid em qualquer nivel do status
-                next((v.get("oid") for v in st.values() if isinstance(v, dict) and "oid" in v), None)
-            )
-            logger.info(f"Ordem OK: {symbol} {'BUY' if is_buy else 'SELL'} {size} @ {price} oid={order_id} status={list(st.keys())}")
+            order_id = (statuses[0].get("resting", {}).get("oid") or
+                        statuses[0].get("filled",  {}).get("oid"))
+            logger.info(f"Ordem OK: {symbol} {'BUY' if is_buy else 'SELL'} {size} @ {price} oid={order_id}")
             return {"status": "ok", "order_id": order_id, "raw": result}
         else:
             logger.error(f"Ordem falhou: {result}")
