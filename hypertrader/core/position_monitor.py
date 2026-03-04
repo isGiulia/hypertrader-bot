@@ -130,7 +130,15 @@ class PositionMonitor:
 
     def _check_levels(self, symbol: str, pos: dict, current: float,
                        real_positions: dict, active_positions: dict):
-        """Verifica SL, TP1, TP2 e trailing stop."""
+        """
+        LIVE: confia nas ordens de SL/TP já colocadas na exchange.
+              Bot apenas:
+                1. Alerta se próximo de liquidação
+                2. Detecta TP1 via redução de tamanho (e move SL para breakeven)
+                3. Atualiza trailing stop após TP1
+
+        DRY_RUN: simula SL/TP internamente (não há exchange real).
+        """
         is_long = pos["direction"] == "LONG"
         entry   = float(pos.get("entry", 0) or current)
         pnl_pct = ((current - entry) / entry * 100) if is_long else ((entry - current) / entry * 100)
@@ -139,21 +147,53 @@ class PositionMonitor:
         real_pnl_usd = real_positions.get(symbol, {}).get("unrealized_pnl", None)
         self._check_liquidation_risk(symbol, pos, pnl_pct, real_pnl_usd)
 
-        sl  = float(pos.get("stop_loss", 0) or 0)
-        tp1 = float(pos.get("tp1", 0) or 0)
-        tp2 = float(pos.get("tp2", 0) or 0)
+        if config.DRY_RUN:
+            # Simulação: fecha SL/TP internamente
+            sl  = float(pos.get("stop_loss", 0) or 0)
+            tp1 = float(pos.get("tp1", 0) or 0)
+            tp2 = float(pos.get("tp2", 0) or 0)
+            hit_sl  = sl  > 0 and ((is_long and current <= sl)  or (not is_long and current >= sl))
+            hit_tp1 = tp1 > 0 and not pos["tp1_hit"] and ((is_long and current >= tp1) or (not is_long and current <= tp1))
+            hit_tp2 = tp2 > 0 and pos["tp1_hit"]     and ((is_long and current >= tp2) or (not is_long and current <= tp2))
+            if hit_sl:
+                self._close_and_remove(symbol, pos, current, "Stop Loss atingido", active_positions)
+            elif hit_tp2:
+                self._close_and_remove(symbol, pos, current, "TP2 atingido", active_positions)
+            elif hit_tp1:
+                self._handle_tp1(symbol, pos, current, entry, tp2, pnl_pct, is_long, active_positions)
+            elif pos["tp1_hit"] and config.TRAILING_STOP:
+                self._update_trailing(symbol, pos, current, is_long, active_positions)
+            return
 
-        hit_sl  = sl  > 0 and ((is_long and current <= sl)  or (not is_long and current >= sl))
-        hit_tp1 = tp1 > 0 and not pos["tp1_hit"] and ((is_long and current >= tp1) or (not is_long and current <= tp1))
-        hit_tp2 = tp2 > 0 and pos["tp1_hit"]     and ((is_long and current >= tp2) or (not is_long and current <= tp2))
+        # ── LIVE: exchange cuida do SL/TP
+        # Detecta TP1 via tamanho real na exchange (exchange fechou 50%)
+        if not pos["tp1_hit"]:
+            real_size = real_positions.get(symbol, {}).get("size", pos["size"])
+            expected  = float(pos.get("size", 0))
+            # Se tamanho real caiu para ~50% do original = TP1 foi executado
+            if expected > 0 and real_size <= expected * 0.6:
+                tp2   = float(pos.get("tp2", 0) or 0)
+                logger.info(f"TP1 detectado via exchange {symbol}: size {expected:.4f} → {real_size:.4f}")
+                pos["size"]     = real_size
+                pos["stop_loss"] = entry   # move SL para breakeven
+                pos["tp1_hit"]  = True
+                if pos.get("sl_order_id"):
+                    try:
+                        self._hl.cancel_order(symbol, pos["sl_order_id"])
+                        r = self._hl.place_order(symbol=symbol, is_buy=not is_long,
+                                                  size=real_size, price=entry,
+                                                  order_type="stop", reduce_only=True)
+                        pos["sl_order_id"] = r.get("order_id")
+                    except Exception as e:
+                        logger.error(f"Move SL breakeven {symbol}: {e}")
+                lev_pnl = pnl_pct * pos.get("leverage", 1)
+                self._notify(messages.tp1_hit_message(symbol, lev_pnl, entry, tp2))
+                active_positions[symbol] = pos
+                self._on_changed()
+                return
 
-        if hit_sl:
-            self._close_and_remove(symbol, pos, current, "Stop Loss atingido", active_positions)
-        elif hit_tp2:
-            self._close_and_remove(symbol, pos, current, "TP2 atingido", active_positions)
-        elif hit_tp1:
-            self._handle_tp1(symbol, pos, current, entry, tp2, pnl_pct, is_long, active_positions)
-        elif pos["tp1_hit"] and config.TRAILING_STOP:
+        # Trailing stop após TP1
+        if pos["tp1_hit"] and config.TRAILING_STOP:
             self._update_trailing(symbol, pos, current, is_long, active_positions)
 
     def _handle_tp1(self, symbol: str, pos: dict, current: float,

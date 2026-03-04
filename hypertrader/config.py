@@ -13,7 +13,7 @@ load_dotenv()
 # ── Configurações de trading
 SYMBOLS          = ["BTC", "ETH", "SOL", "AVAX"]
 MAX_POSITIONS    = 4
-RISK_PER_TRADE   = 0.02          # 2% do capital por trade
+RISK_PER_TRADE   = 0.03  # 3% — adequado para conta pequena (<$200)          # 2% do capital por trade
 MAX_TRADES_DAY   = 6
 DAILY_LOSS_LIMIT = 0.06          # 6% de perda diária = stop total
 DRAWDOWN_HALF    = 10.0          # % drawdown para reduzir risco pela metade
@@ -35,7 +35,7 @@ LEVERAGE_FALLBACK = 3
 
 # ── Intervalos (segundos)
 ANALYSIS_INTERVAL  = 1800   # a cada 30 min
-PNL_UPDATE_INTERVAL = 120   # update de P&L a cada 2 min
+# PNL_UPDATE_INTERVAL removido — update só via comando /pnl no Telegram
 MONITOR_FREQ       = 30     # checa SL/TP a cada 30s dentro do intervalo
 
 # ── Exchange

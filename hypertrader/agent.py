@@ -116,7 +116,6 @@ class HyperTraderAgent:
         logger.info("Loop autônomo iniciado")
         self._notify(messages.startup_message())
 
-        pnl_tick = 0
         while True:
             try:
                 if self.paused:
@@ -126,11 +125,8 @@ class HyperTraderAgent:
                 self._check_new_day()
                 self._check_daily_loss_limit()
 
+                # Verifica se posições foram fechadas na exchange (SL/TP executados)
                 self._monitor.check_all(self._state.active_positions)
-                pnl_tick += 10
-                if pnl_tick >= config.PNL_UPDATE_INTERVAL:
-                    self._notify_pnl_update()
-                    pnl_tick = 0
 
                 acc_val = self._hl.get_account_info().get("equity", 0)
                 self._risk.update_peak(acc_val)
@@ -139,7 +135,7 @@ class HyperTraderAgent:
                 results = await self._run_analysis_cycle()
 
                 next_ts  = datetime.now(timezone.utc).timestamp() + config.ANALYSIS_INTERVAL
-                next_str = datetime.fromtimestamp(next_ts, tz=timezone.utc).strftime("%H:%M UTC")
+                next_str = datetime.fromtimestamp(next_ts, tz=_DISPLAY_TZ).strftime("%H:%M %Z")
 
                 self._notify(messages.cycle_summary(
                     results, acc_val,
@@ -155,8 +151,8 @@ class HyperTraderAgent:
                     f"| pnl=${self._state.session_pnl:+.2f} | prx={next_str}"
                 )
 
-                # Monitora SL/TP a cada 30s durante o intervalo de espera
-                await self._wait_with_monitoring(config.ANALYSIS_INTERVAL, pnl_tick)
+                # Aguarda próximo ciclo verificando fechamentos a cada 30s (sem spam)
+                await self._wait_with_monitoring(config.ANALYSIS_INTERVAL)
 
             except Exception as e:
                 logger.error(f"Erro loop: {e}", exc_info=True)
@@ -354,20 +350,21 @@ class HyperTraderAgent:
             await asyncio.sleep(8)
         return results
 
-    async def _wait_with_monitoring(self, total_seconds: int, pnl_tick: int):
+    async def _wait_with_monitoring(self, total_seconds: int):
+        """
+        Aguarda o próximo ciclo de análise checando fechamentos a cada 30s.
+        NÃO envia spam de PNL — update só via /pnl no Telegram.
+        """
         elapsed      = 0
         monitor_freq = min(config.MONITOR_FREQ, total_seconds)
         while elapsed < total_seconds:
             await asyncio.sleep(monitor_freq)
-            elapsed  += monitor_freq
+            elapsed += monitor_freq
             if self.paused:
                 break
-            if self._state.active_positions:
+            if self._state.active_positions and not config.DRY_RUN:
+                # Só verifica se posições foram fechadas na exchange (SL/TP/manual)
                 self._monitor.check_all(self._state.active_positions)
-                pnl_tick += monitor_freq
-                if pnl_tick >= config.PNL_UPDATE_INTERVAL:
-                    self._notify_pnl_update()
-                    pnl_tick = 0
 
     def _check_new_day(self):
         today = datetime.now(timezone.utc).date()
