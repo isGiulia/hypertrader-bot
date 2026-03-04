@@ -8,6 +8,11 @@ import json
 import asyncio
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+try:
+    _DISPLAY_TZ = ZoneInfo("America/Sao_Paulo")
+except Exception:
+    _DISPLAY_TZ = timezone.utc
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -113,7 +118,7 @@ class TelegramBot:
             if inv: msg += f"✅ <b>Vou entrar quando:</b>\n{self._safe(inv)}\n"
 
         if tec: msg += f"\n📈 <b>Tecnico:</b>\n<i>{self._safe(tec[:400])}</i>\n"
-        msg += f"\n🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+        msg += f"\n🕐 {datetime.now(_DISPLAY_TZ).strftime('%H:%M %Z')}"
         return msg
 
     # ── Comandos
@@ -251,7 +256,7 @@ class TelegramBot:
                 platform_max = lev_map.get(sym, {}).get("maxLeverage", "?")
                 used = "🟢 " if sym in self.agent.active_positions else "   "
                 lines.append(f"{used}<code>{sym:<6}</code> configurado: <code>{configured}x</code> | plataforma: <code>{platform_max}x</code>")
-            lines.append(f"\n🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+            lines.append(f"\n🕐 {datetime.now(_DISPLAY_TZ).strftime('%H:%M %Z')}")
             await m.edit_text("\n".join(lines), parse_mode="HTML")
         except Exception as e:
             await m.edit_text(f"Erro: {e}")
@@ -336,7 +341,7 @@ class TelegramBot:
                     platform_max = lev_map.get(sym, {}).get("maxLeverage", "?")
                     used = "🟢 " if sym in self.agent.active_positions else "   "
                     lines.append(f"{used}<code>{sym:<5}</code> cfg: <code>{configured}x</code> plat: <code>{platform_max}x</code>")
-                lines.append(f"\n🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+                lines.append(f"\n🕐 {datetime.now(_DISPLAY_TZ).strftime('%H:%M %Z')}")
                 await q.edit_message_text("\n".join(lines), parse_mode="HTML")
             elif d == "ajuda":
                 await q.edit_message_text(
@@ -394,7 +399,7 @@ class TelegramBot:
                 f"💵 <b>P&amp;L sessao:</b> <code>${self.agent.session_pnl:+.2f}</code>\n"
                 f"🏆 <b>Win Rate:</b> <code>{wr}%</code> ({self.agent.stats['wins']}W/{self.agent.stats['losses']}L)\n"
                 f"📋 <b>Trades total:</b> <code>{total}</code>\n\n"
-                f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+                f"🕐 {datetime.now(_DISPLAY_TZ).strftime('%Y-%m-%d %H:%M %Z')}"
             )
         except Exception as e:
             return f"Erro ao buscar status: {e}"
@@ -404,7 +409,7 @@ class TelegramBot:
         wr    = round(self.agent.stats["wins"] / total * 100, 1) if total > 0 else 0
         unr   = 0.0
         lines = [
-            f"💰 <b>P&amp;L — {datetime.now(timezone.utc).strftime('%H:%M UTC')}</b>",
+            f"💰 <b>P&amp;L — {datetime.now(_DISPLAY_TZ).strftime('%H:%M %Z')}</b>",
             "────────────────────"
         ]
         if self.agent.active_positions:

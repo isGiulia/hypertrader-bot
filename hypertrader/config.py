@@ -56,3 +56,11 @@ MODEL_REPORT  = "claude-sonnet-4-6"            # relatórios e chat (mais inteli
 
 # ── Arquivo de estado
 STATE_FILE = "state.json"
+
+# ── Fuso horário para exibição nas mensagens Telegram
+# Use o nome IANA da sua timezone. Exemplos:
+#   "America/Sao_Paulo"   → Brasília (UTC-3 / UTC-2 no verão)
+#   "America/New_York"    → Nova York
+#   "Europe/London"       → Londres
+#   "UTC"                 → sem conversão (padrão antigo)
+DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE", "America/Sao_Paulo")

@@ -8,6 +8,11 @@ Cada responsabilidade real fica no módulo especializado.
 import asyncio
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+try:
+    _DISPLAY_TZ = ZoneInfo("America/Sao_Paulo")
+except Exception:
+    _DISPLAY_TZ = timezone.utc
 
 from hypertrader import config
 from hypertrader.ai.claude_client import ClaudeClient

@@ -7,12 +7,22 @@ Funções puras são fáceis de testar e não têm efeitos colaterais.
 """
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from hypertrader import config
 
+# Timezone de exibicao — configuravel via DISPLAY_TIMEZONE no .env
+try:
+    _DISPLAY_TZ = ZoneInfo(config.DISPLAY_TIMEZONE)
+except Exception:
+    _DISPLAY_TZ = timezone.utc
+
 
 def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    """Retorna horario local formatado para exibicao no Telegram."""
+    now_local = datetime.now(_DISPLAY_TZ)
+    tz_name   = now_local.strftime("%Z")
+    return now_local.strftime(f"%H:%M:%S {tz_name}")
 
 
 def _pnl_emoji(value: float) -> str:
