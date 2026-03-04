@@ -114,7 +114,7 @@ class HyperTraderAgent:
 
     def _save_state(self):
         try:
-            state = {"active_positions":self.active_positions,"trade_history":self.trade_history[-100:],
+            state = {"dry_run_mode":CONFIG["dry_run"],"active_positions":self.active_positions,"trade_history":self.trade_history[-100:],
                      "stats":self.stats,"session_pnl":self.session_pnl,"daily_pnl":self.daily_pnl,
                      "daily_trades_count":self.daily_trades_count,"peak_equity":self.risk.peak_equity,
                      "saved_at":datetime.now(timezone.utc).isoformat()}
@@ -127,6 +127,14 @@ class HyperTraderAgent:
         if not os.path.exists(STATE_FILE): return
         try:
             with open(STATE_FILE) as f: s=json.load(f)
+            # Detecta troca de modo (dry_run <-> live) — zera posicoes fantasmas
+            saved_dry = s.get("dry_run_mode", None)
+            if saved_dry is not None and saved_dry != CONFIG["dry_run"]:
+                logger.warning("Modo alterado (dry_run=%s->%s) — posicoes anteriores ignoradas", saved_dry, CONFIG["dry_run"])
+                self.trade_history    = s.get("trade_history", [])
+                self.stats            = s.get("stats", self.stats)
+                self.risk.peak_equity = s.get("peak_equity", 0.0)
+                return
             self.active_positions   = s.get("active_positions",{})
             self.trade_history      = s.get("trade_history",[])
             self.stats              = s.get("stats",self.stats)
@@ -463,9 +471,10 @@ class HyperTraderAgent:
         return {"status":"dry_run" if CONFIG["dry_run"] else "executed"}
 
     def _place_sl_tp(self, symbol, pos, size, is_buy, sl, tp1, tp2):
-        sl  = float(sl)
-        tp1 = float(tp1)
-        tp2 = float(tp2)
+        size = float(size)
+        sl   = float(sl)
+        tp1  = float(tp1)
+        tp2  = float(tp2)
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size,price=sl,order_type="stop",reduce_only=True)
             pos["sl_order_id"]=r.get("order_id")
@@ -840,7 +849,21 @@ class HyperTraderAgent:
                     f"🏆 Win Rate: <code>{wr}%</code> ({self.stats['wins']}W/{self.stats['losses']}L)\n"
                     f"⏱ Proxima: <code>{prx_str}</code>")
                 logger.info(f"Ciclo | pos={len(self.active_positions)} | pnl=${self.session_pnl:+.2f} | prx={prx_str}")
-                await asyncio.sleep(CONFIG["analysis_interval"])
+
+                # Monitora posicoes a cada 30s durante o intervalo (NAO espera 30min sem checar SL/TP)
+                elapsed      = 0
+                interval     = CONFIG["analysis_interval"]
+                monitor_freq = min(30, interval)
+                while elapsed < interval:
+                    await asyncio.sleep(monitor_freq)
+                    elapsed += monitor_freq
+                    if self.paused: break
+                    if self.active_positions:
+                        self.monitor_positions()
+                        pnl_tick += monitor_freq
+                        if pnl_tick >= CONFIG["pnl_update_interval"]:
+                            self.notify_pnl_update()
+                            pnl_tick = 0
             except Exception as e:
                 logger.error(f"Erro loop: {e}", exc_info=True)
                 self._notify(f"🚨 <b>Erro loop</b>\n<code>{str(e)[:200]}</code>")

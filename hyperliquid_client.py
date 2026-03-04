@@ -36,6 +36,7 @@ class HyperliquidClient:
         self._exchange   = None
         self._info       = None
         self._asset_info = {}   # cache: sym -> metadados
+        self._asset_cache_time = 0
 
         if private_key:
             self._init_sdk()
@@ -101,8 +102,11 @@ class HyperliquidClient:
             logger.error(f"_load_asset_info: {e}")
 
     def get_asset_info(self) -> dict:
-        if not self._asset_info:
+        # Recarrega a cada 4h para pegar mudancas de maxLeverage e szDecimals
+        now = time.time()
+        if not self._asset_info or (now - self._asset_cache_time) > 14400:
             self._load_asset_info()
+            self._asset_cache_time = now
         return self._asset_info
 
     def get_max_leverage(self, symbol: str) -> int:
@@ -116,17 +120,28 @@ class HyperliquidClient:
         decimals = self.get_sz_decimals(symbol)
         return round(float(size), decimals)
 
-    def round_price(self, price: float) -> float:
+    def round_price(self, price: float, symbol: str = None) -> float:
         """
-        Arredonda preço seguindo a regra da Hyperliquid:
-        máximo 5 algarismos significativos.
+        Arredonda preco seguindo as duas regras da Hyperliquid:
+        1. Maximo 5 algarismos significativos
+        2. Maximo MAX_DECIMALS - szDecimals casas decimais (MAX_DECIMALS=6 para perps)
+        Ref: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size
         """
         if price <= 0:
             return price
         try:
-            magnitude = floor(log10(abs(price)))
-            factor    = 10 ** (4 - magnitude)
-            return round(round(price * factor) / factor, max(0, 4 - magnitude))
+            # Regra 1: 5 algarismos significativos
+            magnitude  = floor(log10(abs(price)))
+            n_decimals = 4 - magnitude  # 5 sig figs
+
+            # Regra 2: max 6 - szDecimals casas decimais (para perps)
+            if symbol:
+                sz_dec = self.get_sz_decimals(symbol)
+                max_dec = 6 - sz_dec
+                n_decimals = min(n_decimals, max_dec)
+
+            n_decimals = max(n_decimals, 0)
+            return round(price, n_decimals)
         except Exception:
             return round(price, 2)
 
@@ -411,17 +426,17 @@ class HyperliquidClient:
         if order_type == "market":
             slippage = 0.005
             price    = price * (1 + slippage) if is_buy else price * (1 - slippage)
-            price    = self.round_price(price)
+            price    = self.round_price(price, symbol)
             ot_sdk   = {"limit": {"tif": "Ioc"}}
         elif order_type == "stop":
-            price  = self.round_price(price)
+            price  = self.round_price(price, symbol)
             ot_sdk = {"trigger": {
                 "isMarket":  True,
-                "triggerPx": str(price),
+                "triggerPx": price,   # float — SDK processa internamente, nao string
                 "tpsl":      "sl"
             }}
         else:
-            price  = self.round_price(price)
+            price  = self.round_price(price, symbol)
             ot_sdk = {"limit": {"tif": tif}}
 
         logger.info(f"Ordem: {symbol} {'BUY' if is_buy else 'SELL'} sz={size} px={price} [{order_type}]")
