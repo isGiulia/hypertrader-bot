@@ -614,7 +614,21 @@ class HyperTraderAgent:
                     f"🏆 Win Rate: <code>{wr}%</code> ({self.stats['wins']}W/{self.stats['losses']}L)\n"
                     f"⏱ Proxima: <code>{prx_str}</code>")
                 logger.info(f"Ciclo | pos={len(self.active_positions)} | pnl=${self.session_pnl:+.2f} | prx={prx_str}")
-                await asyncio.sleep(CONFIG["analysis_interval"])
+
+                # Monitora posicoes a cada 30s durante o intervalo de analise
+                # Garante que SL/TP sao checados frequentemente mesmo com intervalo longo
+                elapsed = 0
+                interval = CONFIG["analysis_interval"]
+                monitor_freq = min(30, interval)  # checa a cada 30s ou menos
+                while elapsed < interval:
+                    await asyncio.sleep(monitor_freq)
+                    elapsed += monitor_freq
+                    if self.active_positions:
+                        self.monitor_positions()
+                        pnl_tick += monitor_freq
+                        if pnl_tick >= CONFIG["pnl_update_interval"]:
+                            self.notify_pnl_update()
+                            pnl_tick = 0
             except Exception as e:
                 logger.error(f"Erro loop: {e}", exc_info=True)
                 self._notify(f"🚨 <b>Erro loop</b>\n<code>{str(e)[:200]}</code>")
