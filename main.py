@@ -338,19 +338,25 @@ class HyperTraderAgent:
         return {"status":"dry_run" if CONFIG["dry_run"] else "executed"}
 
     def _place_sl_tp(self, symbol, pos, size, is_buy, sl, tp1, tp2):
+        sl  = float(sl)
+        tp1 = float(tp1)
+        tp2 = float(tp2)
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size,price=sl,order_type="stop",reduce_only=True)
             pos["sl_order_id"]=r.get("order_id")
+            logger.info(f"SL [{symbol}] colocado @ ${sl:.4f} oid={pos['sl_order_id']}")
         except Exception as e:
             logger.error(f"SL [{symbol}]: {e}")
             self._notify(f"🚨 ERRO SL — {symbol}: {e} — FECHE MANUALMENTE!")
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size*CONFIG["partial_tp_pct"],price=tp1,order_type="limit",reduce_only=True)
             pos["tp1_order_id"]=r.get("order_id")
+            logger.info(f"TP1 [{symbol}] colocado @ ${tp1:.4f} oid={pos['tp1_order_id']}")
         except Exception as e: logger.error(f"TP1 [{symbol}]: {e}")
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size*(1-CONFIG["partial_tp_pct"]),price=tp2,order_type="limit",reduce_only=True)
             pos["tp2_order_id"]=r.get("order_id")
+            logger.info(f"TP2 [{symbol}] colocado @ ${tp2:.4f} oid={pos['tp2_order_id']}")
         except Exception as e: logger.error(f"TP2 [{symbol}]: {e}")
         return pos
 
