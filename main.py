@@ -353,20 +353,32 @@ class HyperTraderAgent:
         return {"status":"dry_run" if CONFIG["dry_run"] else "executed"}
 
     def _place_sl_tp(self, symbol, pos, size, is_buy, sl, tp1, tp2):
+        # Cast explicito para float — evita erro de formatacao no SDK
+        size = float(size)
+        sl   = float(sl)
+        tp1  = float(tp1)
+        tp2  = float(tp2)
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size,price=sl,order_type="stop",reduce_only=True)
             pos["sl_order_id"]=r.get("order_id")
+            logger.info(f"SL [{symbol}] colocado @ ${sl:.4f} oid={pos['sl_order_id']}")
         except Exception as e:
             logger.error(f"SL [{symbol}]: {e}")
-            self._notify(f"🚨 ERRO SL — {symbol}: {e} — FECHE MANUALMENTE!")
+            self._notify(f"🚨 <b>ERRO SL — {symbol}</b>\nSL NAO colocado @ ${sl:.4f}\n<code>{str(e)[:150]}</code>\nFECHE MANUALMENTE se preco cair abaixo desse nivel!")
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size*CONFIG["partial_tp_pct"],price=tp1,order_type="limit",reduce_only=True)
             pos["tp1_order_id"]=r.get("order_id")
-        except Exception as e: logger.error(f"TP1 [{symbol}]: {e}")
+            logger.info(f"TP1 [{symbol}] colocado @ ${tp1:.4f} oid={pos['tp1_order_id']}")
+        except Exception as e:
+            logger.error(f"TP1 [{symbol}]: {e}")
+            self._notify(f"⚠️ <b>ERRO TP1 — {symbol}</b>\n<code>{str(e)[:150]}</code>")
         try:
             r=self.hl.place_order(symbol=symbol,is_buy=not is_buy,size=size*(1-CONFIG["partial_tp_pct"]),price=tp2,order_type="limit",reduce_only=True)
             pos["tp2_order_id"]=r.get("order_id")
-        except Exception as e: logger.error(f"TP2 [{symbol}]: {e}")
+            logger.info(f"TP2 [{symbol}] colocado @ ${tp2:.4f} oid={pos['tp2_order_id']}")
+        except Exception as e:
+            logger.error(f"TP2 [{symbol}]: {e}")
+            self._notify(f"⚠️ <b>ERRO TP2 — {symbol}</b>\n<code>{str(e)[:150]}</code>")
         return pos
 
     # ── Monitor
@@ -381,7 +393,7 @@ class HyperTraderAgent:
                 if str(pos.get("entry_order_id","")) not in open_oids:
                     try:
                         is_buy=pos["direction"]=="LONG"
-                        pos=self._place_sl_tp(symbol,pos,pos["size"],is_buy,pos["stop_loss"],pos["tp1"],pos["tp2"])
+                        pos=self._place_sl_tp(symbol,pos,float(pos["size"]),is_buy,float(pos["stop_loss"]),float(pos["tp1"]),float(pos["tp2"]))
                         pos["status"]="open"; self.active_positions[symbol]=pos
                         self._notify(f"✅ <b>FILL — {symbol}</b>\nEntrada @ <code>${pos['entry']:,.4f}</code>. SL/TP colocados!")
                         self._save_state()
@@ -415,7 +427,7 @@ class HyperTraderAgent:
                 if not CONFIG["dry_run"] and pos.get("sl_order_id"):
                     try:
                         self.hl.cancel_order(symbol,pos["sl_order_id"])
-                        r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=pos["size"],price=pos["entry"],order_type="stop",reduce_only=True)
+                        r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=float(pos["size"]),price=float(pos["entry"]),order_type="stop",reduce_only=True)
                         pos["sl_order_id"]=r.get("order_id")
                     except Exception as e: logger.error(f"Breakeven SL {symbol}: {e}")
                 lev_pnl=pnl_pct*pos["leverage"]
@@ -432,7 +444,7 @@ class HyperTraderAgent:
                         if not CONFIG["dry_run"] and pos.get("sl_order_id"):
                             try:
                                 self.hl.cancel_order(symbol,pos["sl_order_id"])
-                                r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=pos["size"],price=new_sl,order_type="stop",reduce_only=True)
+                                r=self.hl.place_order(symbol=symbol,is_buy=not is_long,size=float(pos["size"]),price=float(new_sl),order_type="stop",reduce_only=True)
                                 pos["sl_order_id"]=r.get("order_id"); self._save_state()
                             except Exception as e: logger.error(f"Trailing SL {symbol}: {e}")
 
