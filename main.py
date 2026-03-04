@@ -112,7 +112,8 @@ class HyperTraderAgent:
 
     def _save_state(self):
         try:
-            state = {"active_positions":self.active_positions,"trade_history":self.trade_history[-100:],
+            state = {"dry_run_mode":CONFIG["dry_run"],
+                     "active_positions":self.active_positions,"trade_history":self.trade_history[-100:],
                      "stats":self.stats,"session_pnl":self.session_pnl,"daily_pnl":self.daily_pnl,
                      "daily_trades_count":self.daily_trades_count,"peak_equity":self.risk.peak_equity,
                      "saved_at":datetime.now(timezone.utc).isoformat()}
@@ -125,6 +126,20 @@ class HyperTraderAgent:
         if not os.path.exists(STATE_FILE): return
         try:
             with open(STATE_FILE) as f: s=json.load(f)
+            # Detecta troca de modo (dry_run <-> live) e ignora posicoes fantasmas
+            saved_dry   = s.get("dry_run_mode", None)
+            current_dry = CONFIG["dry_run"]
+            if saved_dry is not None and saved_dry != current_dry:
+                logger.warning(f"Modo mudou (dry_run={saved_dry}->{current_dry}). Posicoes anteriores ignoradas.")
+                self._notify(
+                    f"⚠️ <b>Modo alterado</b> ({'DRY RUN' if saved_dry else 'LIVE'} → {'DRY RUN' if current_dry else 'LIVE'})\n"
+                    f"Posicoes anteriores ignoradas automaticamente.\n"
+                    f"Historico e stats preservados."
+                )
+                self.trade_history      = s.get("trade_history",[])
+                self.stats              = s.get("stats",self.stats)
+                self.risk.peak_equity   = s.get("peak_equity",0.0)
+                return
             self.active_positions   = s.get("active_positions",{})
             self.trade_history      = s.get("trade_history",[])
             self.stats              = s.get("stats",self.stats)
