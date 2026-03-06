@@ -1,0 +1,20 @@
+# secrets
+.env
+
+# runtime data
+data/
+logs/
+bot.log
+nohup.out
+bot.pid
+state.json
+journal.ndjson
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# editor
+.vscode/
+.DS_Store
