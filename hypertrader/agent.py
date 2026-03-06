@@ -7,6 +7,7 @@ Cada responsabilidade real fica no módulo especializado.
 """
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 try:
@@ -17,6 +18,7 @@ except Exception:
 from hypertrader import config
 from hypertrader.ai.claude_client import ClaudeClient
 from hypertrader.core.state_manager import StateManager, TradingState
+from hypertrader.core.journal import TradeJournal
 from hypertrader.core.signal_validator import SignalValidator
 from hypertrader.core.trade_executor import TradeExecutor
 from hypertrader.core.position_monitor import PositionMonitor
@@ -55,6 +57,15 @@ class HyperTraderAgent:
         self._state        = self._state_mgr.load()
         self._current_day  = datetime.now(timezone.utc).date()
         self._telegram     = None
+        self._last_reconcile_ts = 0.0
+
+        # Journal persistente (append-only) — histórico "para sempre"
+        self._journal = TradeJournal(config.JOURNAL_FILE)
+        self._journal.log("bot_start", {
+            "testnet": config.USE_TESTNET,
+            "dry_run": config.DRY_RUN,
+            "symbols": config.SYMBOLS,
+        })
 
         # ── Monitor (criado depois do estado — precisa de callbacks)
         self._monitor = PositionMonitor(
@@ -74,11 +85,60 @@ class HyperTraderAgent:
         if not config.DRY_RUN:
             self._sync_with_exchange()
 
+        # ── Reaplica métricas persistidas / overrides
+        # peak_equity precisa sobreviver reinícios para drawdown funcionar.
+        self._risk.peak_equity = float(self._state.peak_equity or 0.0)
+        self._apply_runtime_overrides()
+
         logger.info(
             f"HyperTrader iniciado | {config.SYMBOLS} | "
             f"{'TESTNET' if config.USE_TESTNET else 'MAINNET'} | "
             f"{'DRY RUN' if config.DRY_RUN else 'LIVE'}"
         )
+
+    def _apply_runtime_overrides(self):
+        """Aplica overrides persistidos do state para o risk_manager."""
+        try:
+            mult = float(self._state.risk_multiplier or 1.0)
+            mult = max(0.1, min(mult, 1.0))
+            self._state.risk_multiplier = mult
+
+            base_risk = float(config.RISK_PER_TRADE)
+            self._risk.config["risk_per_trade"] = base_risk * mult
+
+            min_conf = int(config.MIN_CONFIDENCE)
+            if int(self._state.min_confidence_override or 0) > 0:
+                min_conf = max(min_conf, int(self._state.min_confidence_override))
+            self._risk.config["min_confidence"] = min_conf
+        except Exception:
+            pass
+
+    def _is_time_paused(self) -> bool:
+        return bool(self._state.pause_until_ts and time.time() < self._state.pause_until_ts)
+
+    def _pause_for(self, hours: float, reason: str):
+        until = time.time() + max(0.0, hours) * 3600.0
+        self._pause_until(until, reason)
+
+    def _pause_until(self, until_ts: float, reason: str):
+        self._state.pause_until_ts = float(until_ts)
+        self._state.pause_reason = str(reason or "")
+        self._save_state()
+        self._journal.log("risk_pause", {"until_ts": self._state.pause_until_ts, "reason": self._state.pause_reason})
+        self._notify(
+            f"⏸ <b>PAUSA AUTOMÁTICA</b>\n"
+            f"Motivo: <code>{self._state.pause_reason}</code>\n"
+            f"Até: <code>{datetime.fromtimestamp(self._state.pause_until_ts, tz=_DISPLAY_TZ).strftime('%Y-%m-%d %H:%M %Z')}</code>"
+        )
+
+    def _maybe_auto_resume(self):
+        if self._state.pause_until_ts and time.time() >= self._state.pause_until_ts:
+            reason = self._state.pause_reason
+            self._state.pause_until_ts = 0.0
+            self._state.pause_reason = ""
+            self._save_state()
+            self._journal.log("risk_resume", {"reason": reason})
+            self._notify(f"▶️ <b>Retomando automaticamente</b>\nMotivo anterior: <code>{reason}</code>")
 
     # ── Properties para compatibilidade com telegram_bot.py existente
 
@@ -116,21 +176,54 @@ class HyperTraderAgent:
         logger.info("Loop autônomo iniciado")
         self._notify(messages.startup_message())
 
+        # Snapshot inicial (capital + posições reais) — assim o usuário sempre sabe onde está
+        self._notify(self._account_snapshot_message())
+
         while True:
             try:
-                if self.paused:
-                    await asyncio.sleep(30)
+                self._maybe_auto_resume()
+
+                # Mesmo pausado: monitor continua para não "perder" fechamento/TP/SL
+                if self.paused or self._is_time_paused():
+                    if self._state.active_positions and not config.DRY_RUN:
+                        self._monitor.check_all(self._state.active_positions)
+                    await asyncio.sleep(max(5, config.MONITOR_FREQ))
                     continue
 
                 self._check_new_day()
                 self._check_daily_loss_limit()
+
+                # Reconcile silencioso (evita estado "perdido" se algo mudar na exchange)
+                self._reconcile_silent(interval_seconds=600)
 
                 # Verifica se posições foram fechadas na exchange (SL/TP executados)
                 self._monitor.check_all(self._state.active_positions)
 
                 acc_val = self._hl.get_account_info().get("equity", 0)
                 self._risk.update_peak(acc_val)
+                # persiste peak_equity pra drawdown sobreviver restart
+                self._state.peak_equity = float(self._risk.peak_equity or acc_val or 0.0)
+
+                # Meta de patrimônio (opcional)
+                if config.TARGET_EQUITY and acc_val >= config.TARGET_EQUITY:
+                    today_utc = datetime.now(timezone.utc).date().isoformat()
+                    if self._state.last_target_hit_date != today_utc:
+                        self._state.last_target_hit_date = today_utc
+                        self._save_state()
+                        self._journal.log("target_hit", {"equity": acc_val, "target": config.TARGET_EQUITY})
+                        self._notify(
+                            f"🎯 <b>Meta atingida</b>\n"
+                            f"Equity: <code>${acc_val:,.2f}</code> >= alvo <code>${config.TARGET_EQUITY:,.2f}</code>\n"
+                            f"Ação: <code>{config.ON_TARGET_ACTION}</code>"
+                        )
+                    if config.ON_TARGET_ACTION == "pause":
+                        # Pausa novas entradas até você decidir
+                        self._pause_for(24, "Meta atingida — proteção")
+
                 metrics = self._risk.get_risk_metrics(acc_val, self._state.active_positions)
+
+                # Persiste ajustes/peak a cada ciclo (baixa frequência)
+                self._save_state()
 
                 results = await self._run_analysis_cycle()
 
@@ -157,17 +250,110 @@ class HyperTraderAgent:
             except Exception as e:
                 logger.error(f"Erro loop: {e}", exc_info=True)
                 self._notify(f"🚨 <b>Erro loop</b>\n<code>{str(e)[:200]}</code>")
+                self._journal.log("error", {"where": "run_autonomous", "err": str(e)[:500]})
                 await asyncio.sleep(30)
+
+    def _reconcile_silent(self, interval_seconds: int = 600):
+        """Reconcilia posições reais vs estado local sem spam.
+
+        - Se detectar posição real que o bot não conhece, adiciona no estado.
+        - Se detectar que o bot tem posição mas a exchange não, o monitor cuidará.
+        """
+        if config.DRY_RUN:
+            return
+        now = time.time()
+        if (now - self._last_reconcile_ts) < interval_seconds:
+            return
+        self._last_reconcile_ts = now
+        try:
+            acc = self._hl.get_account_info()
+            equity = float(acc.get("equity", 0) or 0)
+            real_pos = self._hl.get_all_positions()
+            added = 0
+            for sym, rp in real_pos.items():
+                if sym not in self._state.active_positions:
+                    self._state.active_positions[sym] = {
+                        "direction":   "LONG" if rp["is_long"] else "SHORT",
+                        "entry":       rp["entry_price"],
+                        "stop_loss": 0, "tp1": 0, "tp2": 0,
+                        "size":        rp["size"],
+                        "leverage":    int(rp.get("leverage", self._get_leverage(sym)) or self._get_leverage(sym)),
+                        "equity_open": equity,
+                        "opened_at":   datetime.now(timezone.utc).isoformat(),
+                        "peak_pnl": 0.0, "tp1_hit": False, "status": "open",
+                        "entry_order_id": None, "sl_order_id": None,
+                        "tp1_order_id": None, "tp2_order_id": None,
+                        "synced_from_exchange": True,
+                        "unrealized_pnl": rp.get("unrealized_pnl", 0),
+                        "liq_price": rp.get("liq_price", 0),
+                        "risk_per_trade_used": float(self._risk.config.get("risk_per_trade", config.RISK_PER_TRADE)),
+                        "min_confidence_used": int(self._risk.config.get("min_confidence", config.MIN_CONFIDENCE)),
+                    }
+                    added += 1
+                    self._journal.log("reconcile_added", {"symbol": sym, "direction": self._state.active_positions[sym]["direction"]})
+
+            if added > 0:
+                self._save_state()
+                self._notify(f"🔄 <b>Reconcile</b>: detectei e importei <code>{added}</code> posição(ões) abertas na exchange.")
+        except Exception as e:
+            self._journal.log("error", {"where": "reconcile", "err": str(e)[:500]})
+
+    def _account_snapshot_message(self) -> str:
+        """Mensagem rápida de snapshot (capital + posições + margem)."""
+        try:
+            acc = self._hl.get_account_info()
+            equity = float(acc.get("equity", 0) or 0)
+            margin_used = float(acc.get("margin_used", 0) or 0)
+            free = float(acc.get("free_margin", max(equity - margin_used, 0)) or 0)
+            real_pos = self._hl.get_all_positions() if not config.DRY_RUN else {}
+            return messages.account_snapshot_message(
+                equity=equity,
+                margin_used=margin_used,
+                free_margin=free,
+                positions=real_pos,
+                paused=(self.paused or self._is_time_paused()),
+                daily_pnl=self._state.daily_pnl,
+                session_pnl=self._state.session_pnl,
+                daily_trades=self._state.daily_trades_count,
+                max_trades=config.MAX_TRADES_DAY,
+            )
+        except Exception as e:
+            return f"⚠️ Snapshot indisponível: <code>{str(e)[:150]}</code>"
+
+    def close_position_manual(self, symbol: str, reason: str = "Manual") -> dict:
+        sym = symbol.upper()
+        if sym not in self._state.active_positions:
+            return {"status": "not_found"}
+        pos = self._state.active_positions[sym]
+        cur = self._hl.get_mark_price(sym)
+        try:
+            # Reutiliza monitor para fechamento consistente + histórico
+            self._monitor._close_and_remove(sym, pos, cur, reason, self._state.active_positions)
+            self._save_state()
+            self._journal.log("manual_close", {"symbol": sym, "reason": reason})
+            return {"status": "closed"}
+        except Exception as e:
+            self._journal.log("error", {"where": "close_position_manual", "err": str(e)[:500]})
+            return {"status": "error", "error": str(e)}
 
     # ── Análise e execução
 
     def analyze_market(self, symbol: str) -> dict:
         logger.info(f"Analisando {symbol}...")
-        data     = self._analyzer.get_full_analysis(symbol)
+        # V1: 4h/1h por padrão (mais estável e barato). V2 pode usar get_full_analysis.
+        if getattr(config, "TRADING_STYLE", "4h_1h") in ("4h_1h", "4h/1h", "swing_4h_1h"):
+            data = self._analyzer.get_v1_analysis(symbol)
+        else:
+            data = self._analyzer.get_full_analysis(symbol)
+
         leverage = self._get_leverage(symbol)
+
         analysis = self._claude.ask(
-            f"{symbol}/USDC perp Hyperliquid. Alavancagem={leverage}x. "
-            f"NAO inclua leverage no JSON. Retorne APENAS o JSON.",
+            (
+                f"{symbol}/USDC perp Hyperliquid. Estilo=4h/1h (4h tendência, 1h gatilho). "
+                f"Alavancagem alvo={leverage}x (não inclua leverage no JSON). "
+                f"Retorne APENAS o JSON válido."
+            ),
             data, symbol=symbol
         )
         signal = self._claude.extract_signal(analysis)
@@ -211,25 +397,39 @@ class HyperTraderAgent:
 
         self._risk.update_peak(equity)
 
-        free_margin  = acc.get("free_margin", equity)
-        min_free     = equity * 0.20
-        if free_margin < min_free:
-            self._notify(
-                f"⛔ <b>Trade bloqueado — {symbol}</b>\n"
-                f"Margem livre: <code>${free_margin:.2f}</code> — mínimo: <code>${min_free:.2f}</code>"
-            )
-            return {"status": "blocked", "reason": "Margem insuficiente"}
+        free_margin = acc.get("free_margin", equity)
 
         size = self._risk.calculate_position_size(equity, entry, sl)
         if size <= 0:
             return {"status": "error", "reason": "Size zero"}
 
-        # Ajusta size se margem insuficiente
+        # Ajuste profissional: se a posição calculada não cabe na margem, tente aumentar
+        # a alavancagem (até o cap do V1) antes de reduzir o size.
+        # Isso mantém o risco por trade (baseado no SL) sem forçar um size inválido.
+        try:
+            platform_max = int(self._leverage_limits.get(symbol, 0) or self._hl.get_max_leverage(symbol) or leverage)
+            hard_cap = max(1, min(platform_max, int(getattr(config, "MAX_LEVERAGE", 20) or 20)))
+            mode = (getattr(config, "LEVERAGE_MODE", "auto") or "auto").lower()
+            cap = hard_cap if mode == "max" else max(1, min(hard_cap, int(getattr(config, "LEVERAGE_CAP", 5) or 5)))
+
+            # Só tenta subir se houver espaço (em auto). Em max, já vem no hard_cap.
+            if mode != "max" and leverage < cap and free_margin > 0:
+                while leverage < cap:
+                    margin_needed_tmp = (size * entry) / leverage
+                    if margin_needed_tmp <= free_margin * 0.95:
+                        break
+                    leverage += 1
+        except Exception:
+            pass
+
+        # Se margem livre insuficiente, ajusta o tamanho para caber
         margin_needed = (size * entry) / leverage
-        if margin_needed > free_margin * 0.9:
-            size = self._hl.round_size(symbol, (free_margin * 0.9 * leverage) / entry)
+        if free_margin > 0 and margin_needed > free_margin * 0.95:
+            size = self._hl.round_size(symbol, (free_margin * 0.95 * leverage) / entry)
+            logger.info(f"Size ajustado por margem: ${free_margin:.2f} livre → size={size}")
             if size <= 0:
-                return {"status": "blocked", "reason": "Size após ajuste = zero"}
+                self._notify(f"⛔ <b>{symbol} bloqueado</b> — Margem insuficiente (<code>${free_margin:.2f}</code>)")
+                return {"status": "blocked", "reason": "Margem insuficiente"}
 
         val = self._risk.validate_trade(signal, self._state.active_positions,
                                          self._state.daily_pnl, total_equity=equity)
@@ -239,6 +439,8 @@ class HyperTraderAgent:
         pos = {
             "direction": direction, "entry": entry, "stop_loss": sl, "tp1": tp1, "tp2": tp2,
             "size": size, "leverage": leverage, "equity_open": equity,
+            "risk_per_trade_used": float(self._risk.config.get("risk_per_trade", config.RISK_PER_TRADE)),
+            "min_confidence_used": int(self._risk.config.get("min_confidence", config.MIN_CONFIDENCE)),
             "opened_at": datetime.now(timezone.utc).isoformat(),
             "peak_pnl": 0.0, "tp1_hit": False, "status": "open",
             "entry_order_id": None, "sl_order_id": None,
@@ -287,6 +489,21 @@ class HyperTraderAgent:
                 return {"status": "error", "error": str(e)}
 
         self._save_state()
+        try:
+            self._journal.log("trade_open", {
+                "symbol": symbol,
+                "direction": direction,
+                "entry": pos.get("entry", entry),
+                "sl": sl,
+                "tp1": tp1,
+                "tp2": tp2,
+                "size": size,
+                "leverage": leverage,
+                "equity": equity,
+                "confidence": confidence,
+            })
+        except Exception:
+            pass
         self._notify(messages.entry_message(
             symbol, direction, leverage, confidence,
             pos.get("entry", entry), size, equity,
@@ -377,28 +594,44 @@ class HyperTraderAgent:
             old_trades = self._state.daily_trades_count
             self._state.daily_pnl          = 0.0
             self._state.daily_trades_count = 0
+
+            # reseta disciplina/performance do dia
+            self._state.consecutive_wins = 0
+            self._state.consecutive_losses = 0
+            self._state.risk_multiplier = 1.0
+            self._state.min_confidence_override = 0
+            self._apply_runtime_overrides()
+
             self._current_day              = today
             self._notify(
                 f"🌅 <b>Novo dia</b> | "
                 f"P&L ontem: <code>${old_pnl:+.2f}</code> | "
                 f"Trades: <code>{old_trades}</code>"
             )
+            self._journal.log("new_day", {"prev_daily_pnl": old_pnl, "prev_trades": old_trades})
 
     def _check_daily_loss_limit(self):
         capital   = self._hl.get_account_info().get("equity", 0)
         daily_lim = capital * config.DAILY_LOSS_LIMIT
         if self._state.daily_pnl < 0 and daily_lim > 0 and abs(self._state.daily_pnl) >= daily_lim:
-            self._notify(
-                f"⛔ <b>STOP DIÁRIO</b> | "
-                f"Perda: <code>${self._state.daily_pnl:.2f}</code> | "
-                f"Limite: <code>${daily_lim:.2f}</code>\nPausado 2h."
-            )
-            raise _DailyLimitReached()
+            self._pause_for(2, f"STOP DIÁRIO: perda ${self._state.daily_pnl:.2f} >= limite ${daily_lim:.2f}")
 
     def _get_leverage(self, symbol: str) -> int:
-        configured   = config.LEVERAGE_MAP.get(symbol, config.LEVERAGE_FALLBACK)
-        platform_max = self._leverage_limits.get(symbol, config.MAX_LEVERAGE)
-        return min(configured, platform_max, config.MAX_LEVERAGE)
+        sym = symbol.upper()
+        platform_max = int(self._leverage_limits.get(sym, 0) or 0)
+        if platform_max <= 0:
+            platform_max = int(self._hl.get_max_leverage(sym) or config.LEVERAGE_FALLBACK)
+
+        hard_cap = max(1, min(platform_max, int(getattr(config, "MAX_LEVERAGE", 20) or 20)))
+
+        mode = (getattr(config, "LEVERAGE_MODE", "auto") or "auto").lower()
+        if mode == "max":
+            # Tenta usar o máximo permitido (ainda respeitando hard_cap).
+            return hard_cap
+
+        preferred = int(getattr(config, "LEVERAGE_MAP", {}).get(sym, getattr(config, "LEVERAGE_FALLBACK", 3)) or 3)
+        cap = int(getattr(config, "LEVERAGE_CAP", 5) or 5)
+        return max(1, min(preferred, hard_cap, cap))
 
     def _load_leverage_limits(self):
         try:
@@ -444,9 +677,17 @@ class HyperTraderAgent:
 
             self._save_state()
             self._notify(messages.sync_message(equity, real_pos, open_orders, fills_summary, funding))
+            self._journal.log("sync", {
+                "equity": equity,
+                "positions": len(real_pos),
+                "open_orders": len(open_orders),
+                "fills_total": fills_summary.get("total_trades"),
+                "funding_24h": funding.get("total_funding_usd"),
+            })
             logger.info(f"Sync OK: {len(real_pos)} posições, {len(open_orders)} ordens")
         except Exception as e:
             logger.error(f"Sync: {e}", exc_info=True)
+            self._journal.log("error", {"where": "sync", "err": str(e)[:500]})
 
     def _on_position_closed(self, symbol: str, pos: dict, exit_price: float,
                              reason: str, pnl_usd: float, fee: float, dur_min: int):
@@ -465,6 +706,41 @@ class HyperTraderAgent:
             "fee": fee, "duration_min": dur_min,
             "closed_at": datetime.now(timezone.utc).isoformat(),
         })
+
+        # ── Performance streak (auto-avaliação simples)
+        if pnl_usd >= 0:
+            self._state.consecutive_wins += 1
+            self._state.consecutive_losses = 0
+        else:
+            self._state.consecutive_losses += 1
+            self._state.consecutive_wins = 0
+
+        self._journal.log("trade_close", {
+            "symbol": symbol,
+            "direction": pos.get("direction"),
+            "pnl_usd": pnl_usd,
+            "fee": fee,
+            "reason": reason,
+            "duration_min": dur_min,
+        })
+
+        # ── Regras de disciplina
+        # 1) Se ganhou no primeiro trade do dia, pausa novas entradas até o próximo dia.
+        if config.STOP_AFTER_FIRST_WIN and pnl_usd > 0 and self._state.daily_trades_count >= 1:
+            # pausa até amanhã 00:05 no fuso de exibição
+            now_local = datetime.now(_DISPLAY_TZ)
+            tomorrow = (now_local.date().toordinal() + 1)
+            next_day = datetime.fromordinal(tomorrow).replace(hour=0, minute=5, second=0, microsecond=0, tzinfo=_DISPLAY_TZ)
+            self._pause_until(next_day.timestamp(), "Meta do dia: trade positivo atingido")
+
+        # 2) Muitas perdas seguidas: reduz risco, aumenta rigor e pausa para "revisar".
+        if self._state.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+            self._state.risk_multiplier = max(0.1, float(self._state.risk_multiplier) * float(config.LOSS_RISK_MULTIPLIER))
+            self._state.min_confidence_override = max(int(self._risk.config.get("min_confidence", config.MIN_CONFIDENCE)), int(config.MIN_CONFIDENCE) + int(config.LOSS_CONFIDENCE_ADD))
+            self._apply_runtime_overrides()
+            self._pause_for(float(config.LOSS_PAUSE_HOURS), f"{self._state.consecutive_losses} perdas seguidas — reduzindo risco e aumentando filtro")
+
+        self._save_state()
 
     def _save_state(self):
         self._state_mgr.save(self._state)

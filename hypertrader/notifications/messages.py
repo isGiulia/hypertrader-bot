@@ -35,13 +35,15 @@ def startup_message() -> str:
     net = "TESTNET" if config.USE_TESTNET else "MAINNET"
     mode = "DRY RUN — Simulado" if config.DRY_RUN else "🔴 LIVE — Dinheiro real"
     symbols = ", ".join(config.SYMBOLS)
+    lev_mode = getattr(config, "LEVERAGE_MODE", "auto")
+    lev_cap = getattr(config, "LEVERAGE_CAP", "?")
     return (
         f"🚀 <b>HyperTrader ATIVO</b>\n────────────────────\n"
         f"🌐 {net}\n"
         f"⚙️ {mode}\n"
         f"🎯 Pares: <code>{symbols}</code>\n"
-        f"💰 Risco/trade: <code>{config.RISK_PER_TRADE * 100:.0f}%</code> "
-        f"| Lev: <code>BTC/ETH=5x SOL/AVAX=3x</code>\n"
+        f"💰 Risco/trade: <code>{config.RISK_PER_TRADE * 100:.2f}%</code> "
+        f"| Lev: <code>{lev_mode}</code> (cap <code>{lev_cap}x</code>)\n"
         f"⏱ Intervalo: <code>{config.ANALYSIS_INTERVAL}s</code>"
     )
 
@@ -81,6 +83,45 @@ def sync_message(equity: float, real_pos: dict, open_orders: list,
     return msg
 
 
+def account_snapshot_message(equity: float, margin_used: float, free_margin: float,
+                             positions: dict, paused: bool,
+                             daily_pnl: float, session_pnl: float,
+                             daily_trades: int, max_trades: int) -> str:
+    """Snapshot curto: capital + onde está alocado + PnL."""
+    net  = "TESTNET" if config.USE_TESTNET else "MAINNET"
+    mode = "DRY RUN" if config.DRY_RUN else "🔴 LIVE"
+    st   = "⏸ PAUSADO" if paused else "✅ RODANDO"
+
+    msg = (
+        f"💼 <b>Snapshot da Conta</b>\n────────────────────\n"
+        f"{st} | 🌐 {net} | {mode}\n\n"
+        f"💰 Equity: <code>${equity:,.2f}</code>\n"
+        f"📊 Margem usada: <code>${margin_used:,.2f}</code>\n"
+        f"🆓 Livre: <code>${free_margin:,.2f}</code>\n\n"
+        f"🔢 Trades hoje: <code>{daily_trades}/{max_trades}</code>\n"
+        f"💵 P&L hoje: <code>${daily_pnl:+.2f}</code> | sessão: <code>${session_pnl:+.2f}</code>\n"
+    )
+
+    if positions:
+        msg += "\n────────────────────\n📈 <b>Posições (exchange)</b>\n"
+        for sym, rp in list(positions.items())[:6]:
+            side = "LONG" if rp.get("is_long") else "SHORT"
+            em = "🟢" if rp.get("is_long") else "🔴"
+            entry = float(rp.get("entry_price", 0) or 0)
+            liq = float(rp.get("liq_price", 0) or 0)
+            upnl = float(rp.get("unrealized_pnl", 0) or 0)
+            m_used = float(rp.get("margin_used", 0) or 0)
+            msg += (
+                f"{em} <b>{sym}</b> {side} | margem <code>${m_used:,.2f}</code> | uPnL <code>${upnl:+.2f}</code>\n"
+                f"  entrada <code>${entry:,.4f}</code> | liq <code>${liq:,.4f}</code>\n"
+            )
+    else:
+        msg += "\n📭 Sem posições abertas agora.\n"
+
+    msg += f"\n🕐 {_now_utc()}"
+    return msg
+
+
 # ── Trade lifecycle
 
 def entry_message(symbol: str, direction: str, leverage: int, confidence: int,
@@ -93,7 +134,8 @@ def entry_message(symbol: str, direction: str, leverage: int, confidence: int,
 
     valor_usdc      = real_entry * size
     margem_usada    = valor_usdc / leverage
-    risco_usdc      = (abs(real_entry - sl) / real_entry) * equity * config.RISK_PER_TRADE if real_entry > 0 else 0
+    risk_used       = float(pos.get("risk_per_trade_used", config.RISK_PER_TRADE) or config.RISK_PER_TRADE)
+    risco_usdc      = equity * risk_used
     em              = "🟢" if direction == "LONG" else "🔴"
     mode_label      = "DRY RUN" if config.DRY_RUN else "🔴 LIVE"
 
@@ -104,7 +146,7 @@ def entry_message(symbol: str, direction: str, leverage: int, confidence: int,
         f"💵 Preço executado: <code>${real_entry:,.4f}</code>\n"
         f"📦 Size: <code>{size}</code> contratos = <code>${valor_usdc:,.2f} USDC</code> notional\n"
         f"🏦 Margem usada: <code>${margem_usada:,.2f} USDC</code> ({margem_usada/equity*100:.1f}% do capital)\n"
-        f"⚠️ Risco máximo: <code>${risco_usdc:,.2f} USDC</code> ({config.RISK_PER_TRADE*100:.0f}% do capital)\n\n"
+        f"⚠️ Risco máximo: <code>${risco_usdc:,.2f} USDC</code> ({risk_used*100:.2f}% do capital)\n\n"
         f"🛑 SL:  <code>${sl:,.4f}</code> (-{risk_pct:.2f}%)\n"
         f"🎯 TP1: <code>${tp1:,.4f}</code> (+{tp1_pct:.2f}%)\n"
         f"🏆 TP2: <code>${tp2:,.4f}</code> (+{tp2_pct:.2f}%)\n\n"

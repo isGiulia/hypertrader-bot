@@ -20,12 +20,20 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes
 )
 
+from hypertrader import config
+
 logger = logging.getLogger("TelegramBot")
 
-ALLOWED_IDS = [
-    int(x.strip()) for x in os.getenv("TELEGRAM_ALLOWED_IDS", "0").split(",")
-    if x.strip().isdigit()
-]
+_allowed_raw = (os.getenv("TELEGRAM_ALLOWED_IDS") or "").strip()
+# Se não configurar, libera apenas leitura via Telegram (sem bloqueio).
+# Para segurança, configure TELEGRAM_ALLOWED_IDS="123,456".
+if not _allowed_raw or _allowed_raw == "0":
+    ALLOWED_IDS = []
+else:
+    ALLOWED_IDS = [
+        int(x.strip()) for x in _allowed_raw.split(",")
+        if x.strip().isdigit()
+    ]
 
 
 def auth(func):
@@ -60,16 +68,13 @@ class TelegramBot:
         a.add_handler(CommandHandler("posicoes",    self.cmd_posicoes))
         a.add_handler(CommandHandler("pnl",         self.cmd_pnl))
         a.add_handler(CommandHandler("analisar",    self.cmd_analisar))
-        a.add_handler(CommandHandler("relatorio",   self.cmd_relatorio))
         a.add_handler(CommandHandler("historico",   self.cmd_historico))
         a.add_handler(CommandHandler("pausar",      self.cmd_pausar))
         a.add_handler(CommandHandler("retomar",     self.cmd_retomar))
         a.add_handler(CommandHandler("fechar",      self.cmd_fechar))
-        a.add_handler(CommandHandler("config",      self.cmd_config))
-        a.add_handler(CommandHandler("alavancagem", self.cmd_alavancagem))
         a.add_handler(CommandHandler("ajuda",       self.cmd_ajuda))
         a.add_handler(CallbackQueryHandler(self.handle_callback))
-        a.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_msg))
+        # Sem "chat livre" na V1 — reduz risco de comando ambíguo.
 
     def _safe(self, text: str) -> str:
         return str(text).replace("<", "").replace(">", "").replace("&", "e")
@@ -141,10 +146,7 @@ class TelegramBot:
             [InlineKeyboardButton("📈 Posicoes",   callback_data="posicoes"),
              InlineKeyboardButton("📋 Historico",  callback_data="historico")],
             *analyze_rows,
-            [InlineKeyboardButton("📋 Relatorio",  callback_data="relatorio"),
-             InlineKeyboardButton("⚙️ Config",      callback_data="config")],
-            [InlineKeyboardButton("🔢 Alavancagem",callback_data="alavancagem"),
-             InlineKeyboardButton("📖 Ajuda",      callback_data="ajuda")],
+            [InlineKeyboardButton("📖 Ajuda",      callback_data="ajuda")],
             [InlineKeyboardButton("⏸ Pausar",     callback_data="pausar"),
              InlineKeyboardButton("▶️ Retomar",    callback_data="retomar")],
         ]
@@ -155,8 +157,7 @@ class TelegramBot:
             f"────────────────────\n"
             f"Rede: <code>{rede}</code> | Modo: <code>{modo}</code>\n"
             f"Pares: <code>{', '.join(syms)}</code>\n"
-            f"Lev: <code>BTC/ETH=5x | SOL/AVAX=3x</code>\n\n"
-            f"Use os botoes ou envie mensagem para o agente.",
+            f"\nUse os botões (ou /ajuda).",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(kb)
         )
@@ -174,24 +175,13 @@ class TelegramBot:
     @auth
     async def cmd_posicoes(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         m = await update.message.reply_text("⏳ Carregando...")
-        await m.edit_text(self._positions_text(), parse_mode="HTML")
+        text = await asyncio.get_event_loop().run_in_executor(None, self._positions_text)
+        await m.edit_text(text, parse_mode="HTML")
 
     @auth
     async def cmd_analisar(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         symbol = ctx.args[0].upper() if ctx.args else "BTC"
         await self._do_analyze(update, symbol)
-
-    @auth
-    async def cmd_relatorio(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        m = await update.message.reply_text("📋 Gerando relatorio...")
-        try:
-            report = await asyncio.get_event_loop().run_in_executor(
-                None, self.agent.generate_daily_report)
-            await m.edit_text(
-                f"📋 <b>RELATORIO DE SESSAO</b>\n\n{self._safe(report[:3800])}",
-                parse_mode="HTML")
-        except Exception as e:
-            await m.edit_text(f"Erro: {e}")
 
     @auth
     async def cmd_historico(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -216,50 +206,13 @@ class TelegramBot:
         if sym not in self.agent.active_positions:
             await update.message.reply_text(f"Sem posicao aberta em {sym}.")
             return
-        pos = self.agent.active_positions[sym]
-        cur = self.agent.hl.get_mark_price(sym)
-        self.agent._close_position(sym, pos, cur, "Manual via Telegram")
-        await update.message.reply_text(
-            f"Posicao <b>{sym}</b> fechada manualmente.", parse_mode="HTML")
-
-    @auth
-    async def cmd_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        
-        lev_map = config.LEVERAGE_MAP
-        lev_str = " | ".join(f"{k}={v}x" for k, v in lev_map.items())
-        await update.message.reply_text(
-            f"⚙️ <b>Configuracao Atual</b>\n"
-            f"────────────────────\n"
-            f"🌐 Rede: <code>{'MAINNET' if not config.USE_TESTNET else 'TESTNET'}</code>\n"
-            f"⚙️ Modo: <code>{'LIVE 🔴' if not config.DRY_RUN else 'DRY RUN 🔵'}</code>\n"
-            f"🎯 Pares: <code>{', '.join(config.SYMBOLS)}</code>\n"
-            f"📊 Max posicoes: <code>{config.MAX_POSITIONS}</code>\n"
-            f"💰 Risco/trade: <code>{config.RISK_PER_TRADE*100:.1f}%</code>\n"
-            f"🛑 Stop diario: <code>{config.DAILY_LOSS_LIMIT*100:.0f}%</code>\n"
-            f"🛡️ Drawdown half: <code>{config.DRAWDOWN_HALF}%</code> | stop: <code>{config.DRAWDOWN_STOP}%</code>\n"
-            f"⏱ Intervalo: <code>{config.ANALYSIS_INTERVAL}s</code>\n"
-            f"🤖 Confianca minima: <code>{config.MIN_CONFIDENCE}%</code>\n"
-            f"🔢 Alavancagem: <code>{lev_str}</code>",
-            parse_mode="HTML"
+        r = await asyncio.get_event_loop().run_in_executor(
+            None, self.agent.close_position_manual, sym, "Manual via Telegram"
         )
-
-    @auth
-    async def cmd_alavancagem(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        m = await update.message.reply_text("⏳ Buscando...")
-        try:
-            lev_map = await asyncio.get_event_loop().run_in_executor(
-                None, self.agent.hl.get_asset_info)
-            
-            lines = ["🔢 <b>Alavancagem por Moeda</b>", "────────────────────"]
-            for sym in config.SYMBOLS:
-                configured   = config.LEVERAGE_MAP.get(sym, config.LEVERAGE_FALLBACK)
-                platform_max = lev_map.get(sym, {}).get("maxLeverage", "?")
-                used = "🟢 " if sym in self.agent.active_positions else "   "
-                lines.append(f"{used}<code>{sym:<6}</code> configurado: <code>{configured}x</code> | plataforma: <code>{platform_max}x</code>")
-            lines.append(f"\n🕐 {datetime.now(_DISPLAY_TZ).strftime('%H:%M %Z')}")
-            await m.edit_text("\n".join(lines), parse_mode="HTML")
-        except Exception as e:
-            await m.edit_text(f"Erro: {e}")
+        if r.get("status") == "closed":
+            await update.message.reply_text(f"✅ Fechada: <b>{sym}</b>.", parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"⚠️ Não consegui fechar: {r}", parse_mode="HTML")
 
     @auth
     async def cmd_ajuda(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -271,13 +224,10 @@ class TelegramBot:
             "/posicoes — Posicoes abertas agora\n"
             "/historico — Historico de trades\n"
             "/analisar BTC — Analisar qualquer moeda\n"
-            "/relatorio — Relatorio completo da sessao\n"
             "/pausar — Parar novas analises\n"
             "/retomar — Retomar o bot\n"
             "/fechar BTC — Fechar posicao manualmente\n"
-            "/config — Ver configuracoes atuais\n"
-            "/alavancagem — Alavancagem por moeda\n\n"
-            "💬 <b>Dica:</b> Envie qualquer mensagem para conversar com o agente!",
+            "\n🧠 <b>V1:</b> sem chat livre (evita comandos ambiguos e spam).",
             parse_mode="HTML"
         )
 
@@ -297,12 +247,6 @@ class TelegramBot:
                 await q.edit_message_text(self._positions_text(), parse_mode="HTML")
             elif d == "historico":
                 await q.edit_message_text(self._history_text(), parse_mode="HTML")
-            elif d == "relatorio":
-                await q.edit_message_text("📋 Gerando relatorio...")
-                report = await asyncio.get_event_loop().run_in_executor(
-                    None, self.agent.generate_daily_report)
-                await q.edit_message_text(
-                    f"📋 <b>RELATORIO</b>\n\n{self._safe(report[:3800])}", parse_mode="HTML")
             elif d.startswith("analisar_"):
                 sym = d.split("_", 1)[1]
                 await q.edit_message_text(f"🔍 Analisando <b>{sym}</b>...", parse_mode="HTML")
@@ -317,36 +261,12 @@ class TelegramBot:
             elif d == "retomar":
                 self.agent.paused = False
                 await q.edit_message_text("▶️ <b>Bot retomado!</b>", parse_mode="HTML")
-            elif d == "config":
-                lev_str = " | ".join(f"{k}={v}x" for k, v in config.LEVERAGE_MAP.items())
-                await q.edit_message_text(
-                    f"⚙️ <b>Config</b>\n"
-                    f"Rede: <code>{'TESTNET' if config.USE_TESTNET else 'MAINNET'}</code>\n"
-                    f"Modo: <code>{'DRY RUN' if config.DRY_RUN else 'LIVE 🔴'}</code>\n"
-                    f"Pares: <code>{', '.join(config.SYMBOLS)}</code>\n"
-                    f"Risco/trade: <code>{config.RISK_PER_TRADE*100:.1f}%</code>\n"
-                    f"Max pos: <code>{config.MAX_POSITIONS}</code>\n"
-                    f"Conf. minima: <code>{config.MIN_CONFIDENCE}%</code>\n"
-                    f"Alavancagem: <code>{lev_str}</code>",
-                    parse_mode="HTML")
-            elif d == "alavancagem":
-                lev_map = await asyncio.get_event_loop().run_in_executor(
-                    None, self.agent.hl.get_asset_info)
-                
-                lines = ["🔢 <b>Alavancagem Maxima</b>", "────────────────────"]
-                for sym in config.SYMBOLS:
-                    configured   = config.LEVERAGE_MAP.get(sym, config.LEVERAGE_FALLBACK)
-                    platform_max = lev_map.get(sym, {}).get("maxLeverage", "?")
-                    used = "🟢 " if sym in self.agent.active_positions else "   "
-                    lines.append(f"{used}<code>{sym:<5}</code> cfg: <code>{configured}x</code> plat: <code>{platform_max}x</code>")
-                lines.append(f"\n🕐 {datetime.now(_DISPLAY_TZ).strftime('%H:%M %Z')}")
-                await q.edit_message_text("\n".join(lines), parse_mode="HTML")
             elif d == "ajuda":
                 await q.edit_message_text(
                     "📖 <b>Comandos:</b>\n"
                     "/status /pnl /posicoes /historico\n"
                     "/analisar BTC /pausar /retomar\n"
-                    "/config /alavancagem /fechar BTC",
+                    "/fechar BTC",
                     parse_mode="HTML")
         except Exception as e:
             logger.error(f"Callback error [{d}]: {e}")
@@ -376,15 +296,23 @@ class TelegramBot:
                 None, self.agent.hl.get_account_info)
             equity = acc.get("equity", 0)
             margin = acc.get("margin_used", 0)
-            free   = equity - margin
+            free   = acc.get("free_margin", max(equity - margin, 0))
             
             total  = self.agent.stats["total"]
             wr     = round(self.agent.stats["wins"] / total * 100, 1) if total > 0 else 0
-            dd_pct = self.agent.risk.get_drawdown_pct(equity)
+            dd_pct = self.agent._risk.get_drawdown_pct(equity)
+
+            pause_extra = ""
+            try:
+                if self.agent._state.pause_until_ts and self.agent._state.pause_until_ts > 0:
+                    until = datetime.fromtimestamp(self.agent._state.pause_until_ts, tz=_DISPLAY_TZ).strftime('%Y-%m-%d %H:%M %Z')
+                    pause_extra = f"\n⏳ <b>Pausa automática:</b> <code>{until}</code>\n🧾 Motivo: <code>{self._safe(self.agent._state.pause_reason)}</code>"
+            except Exception:
+                pass
             return (
                 f"🤖 <b>HyperTrader — Status</b>\n"
                 f"────────────────────\n"
-                f"{'⏸ PAUSADO' if self.agent.paused else '✅ RODANDO'}\n"
+                f"{'⏸ PAUSADO' if (self.agent.paused or (self.agent._state.pause_until_ts and self.agent._state.pause_until_ts > 0)) else '✅ RODANDO'}{pause_extra}\n"
                 f"🌐 <code>{'TESTNET' if config.USE_TESTNET else 'MAINNET'}</code> | "
                 f"<code>{'DRY RUN' if config.DRY_RUN else 'LIVE 🔴'}</code>\n\n"
                 f"💰 <b>Equity:</b> <code>${equity:,.2f}</code>\n"
@@ -392,7 +320,7 @@ class TelegramBot:
                 f"🆓 <b>Livre:</b> <code>${free:,.2f}</code>\n"
                 f"📉 <b>Drawdown:</b> <code>{dd_pct:.1f}%</code>\n\n"
                 f"📈 <b>Posicoes:</b> <code>{len(self.agent.active_positions)}/{config.MAX_POSITIONS}</code>\n"
-                f"🔢 <b>Trades hoje:</b> <code>{self.agent.daily_trades_count}/{config.MAX_TRADES_DAY}</code>\n"
+                f"🔢 <b>Trades hoje:</b> <code>{self.agent._state.daily_trades_count}/{config.MAX_TRADES_DAY}</code>\n"
                 f"💵 <b>P&amp;L hoje:</b> <code>${self.agent.daily_pnl:+.2f}</code>\n"
                 f"💵 <b>P&amp;L sessao:</b> <code>${self.agent.session_pnl:+.2f}</code>\n"
                 f"🏆 <b>Win Rate:</b> <code>{wr}%</code> ({self.agent.stats['wins']}W/{self.agent.stats['losses']}L)\n"
@@ -406,6 +334,14 @@ class TelegramBot:
         total = self.agent.stats["total"]
         wr    = round(self.agent.stats["wins"] / total * 100, 1) if total > 0 else 0
         unr   = 0.0
+        real_positions = {}
+        if self.agent.active_positions and (not config.DRY_RUN):
+            try:
+                real_positions = await asyncio.get_event_loop().run_in_executor(
+                    None, self.agent.hl.get_all_positions
+                )
+            except Exception:
+                real_positions = {}
         lines = [
             f"💰 <b>P&amp;L — {datetime.now(_DISPLAY_TZ).strftime('%H:%M %Z')}</b>",
             "────────────────────"
@@ -415,16 +351,28 @@ class TelegramBot:
             for sym, pos in self.agent.active_positions.items():
                 cur  = self.agent.hl.get_mark_price(sym)
                 il   = pos["direction"] == "LONG"
-                pp   = ((cur - pos["entry"]) / pos["entry"] * 100) if il \
-                       else ((pos["entry"] - cur) / pos["entry"] * 100)
-                pl   = pp * pos["leverage"]
-                pu   = (pp / 100) * pos["equity_open"]
-                unr  += pu
+                entry = float(pos.get("entry", 0) or cur)
+                pp   = ((cur - entry) / entry * 100) if il else ((entry - cur) / entry * 100)
+                pl   = pp * float(pos.get("leverage", 1) or 1)
+
+                # Preferir PnL real da exchange
+                pu = None
+                if sym in real_positions:
+                    pu = float(real_positions[sym].get("unrealized_pnl", 0) or 0)
+                else:
+                    # fallback aproximado
+                    notional = entry * float(pos.get("size", 0) or 0)
+                    pu = (pp / 100.0) * notional
+
+                unr  += float(pu)
                 em   = "🟢" if pu >= 0 else "🔴"
                 st   = "⏳" if pos.get("status") == "pending_fill" else ""
+                notional = cur * float(pos.get("size", 0) or 0)
+                margin = notional / float(pos.get("leverage", 1) or 1) if notional > 0 else 0
                 lines.append(
                     f"\n{em}{st} <b>{sym}</b> | {'LONG' if il else 'SHORT'} {pos['leverage']}x\n"
-                    f"  Entrada: <code>${pos['entry']:,.4f}</code> → <code>${cur:,.4f}</code>\n"
+                    f"  Entrada: <code>${entry:,.4f}</code> → <code>${cur:,.4f}</code>\n"
+                    f"  Alocado: <code>${margin:,.2f}</code> (margem) | Notional: <code>${notional:,.2f}</code>\n"
                     f"  P&amp;L: <code>{pl:+.2f}%</code> (<code>${pu:+.2f}</code>)"
                 )
         else:
@@ -444,38 +392,125 @@ class TelegramBot:
     def _positions_text(self) -> str:
         if not self.agent.active_positions:
             return "📭 <b>Nenhuma posicao aberta.</b>"
+
+        # Busca ordens abertas reais da exchange para mostrar alvos reais
+        exchange_orders = {}
+        real_positions = {}
+        try:
+            for o in self.agent.hl.get_open_orders():
+                coin = o.get("coin", "")
+                if coin not in exchange_orders:
+                    exchange_orders[coin] = []
+                exchange_orders[coin].append(o)
+        except Exception:
+            pass
+
+        try:
+            if not config.DRY_RUN:
+                real_positions = self.agent.hl.get_all_positions()
+        except Exception:
+            real_positions = {}
+
         lines = [f"📈 <b>Posicoes Abertas ({len(self.agent.active_positions)})</b>",
                  "────────────────────"]
+
         for sym, pos in self.agent.active_positions.items():
-            cur     = self.agent.hl.get_mark_price(sym)
-            il      = pos["direction"] == "LONG"
-            pp      = ((cur - pos["entry"]) / pos["entry"] * 100) if il \
-                      else ((pos["entry"] - cur) / pos["entry"] * 100)
-            pl      = pp * pos["leverage"]
-            pu      = (pp / 100) * pos["equity_open"]
-            em      = "🟢" if pu >= 0 else "🔴"
-            st      = "⏳ aguardando fill" if pos.get("status") == "pending_fill" else ""
-            be      = "✅ breakeven" if pos.get("tp1_hit") else ""
+            cur  = self.agent.hl.get_mark_price(sym)
+            il   = pos["direction"] == "LONG"
+            entry = float(pos.get("entry", 0) or cur)
+            pp   = ((cur - entry) / entry * 100) if il else ((entry - cur) / entry * 100)
+            pl   = pp * pos["leverage"]
+            # Preferir unrealized real
+            pu = None
+            if sym in real_positions:
+                pu = float(real_positions[sym].get("unrealized_pnl", 0) or 0)
+            else:
+                notional_tmp = cur * float(pos.get("size", 0) or 0)
+                pu = (pp / 100.0) * notional_tmp
+            em   = "🟢" if pu >= 0 else "🔴"
+            st   = "⏳ aguardando fill" if pos.get("status") == "pending_fill" else ""
+            be   = "✅ breakeven atingido" if pos.get("tp1_hit") else ""
+
+            # Monta alvos: usa estado interno OU busca da exchange
+            sl   = float(pos.get("stop_loss", 0) or 0)
+            tp1  = float(pos.get("tp1", 0) or 0)
+            tp2  = float(pos.get("tp2", 0) or 0)
+
+            # Se alvos estao zerados, busca das ordens abertas na exchange
+            if (sl == 0 or tp1 == 0) and sym in exchange_orders:
+                stops, limits = [], []
+                for o in exchange_orders[sym]:
+                    px = float(o.get("limitPx", 0))
+                    ot = o.get("orderType", "")
+                    if "Stop" in ot or "stop" in ot.lower() or o.get("triggerPx"):
+                        stops.append(float(o.get("triggerPx", px) or px))
+                    else:
+                        limits.append(px)
+                if stops:
+                    sl = stops[0]
+                limits_sorted = sorted(limits) if il else sorted(limits, reverse=True)
+                if len(limits_sorted) >= 1: tp1 = limits_sorted[0]
+                if len(limits_sorted) >= 2: tp2 = limits_sorted[1]
+
+            sl_str  = f"<code>${sl:,.4f}</code>"  if sl  > 0 else "<code>—</code>"
+            tp1_str = f"<code>${tp1:,.4f}</code>" if tp1 > 0 else "<code>—</code>"
+            tp2_str = f"<code>${tp2:,.4f}</code>" if tp2 > 0 else "<code>—</code>"
+
+            # Distancia ate SL e TP1
+            sl_dist  = f" ({abs(cur-sl)/cur*100:.1f}%)"  if sl  > 0 else ""
+            tp1_dist = f" ({abs(tp1-cur)/cur*100:.1f}%)" if tp1 > 0 else ""
+
+            notional = cur * float(pos.get("size", 0) or 0)
+            margin_calc = notional / float(pos.get("leverage", 1) or 1) if notional > 0 else 0
+            margin_real = float(real_positions.get(sym, {}).get("margin_used", 0) or 0)
+            margin_used = margin_real if margin_real > 0 else margin_calc
+
             lines.append(
                 f"\n{em} <b>{sym}</b> | {'LONG' if il else 'SHORT'} {pos['leverage']}x {st}{be}\n"
-                f"  Entrada: <code>${pos['entry']:,.4f}</code> → <code>${cur:,.4f}</code>\n"
+                f"  Entrada: <code>${entry:,.4f}</code> → Atual: <code>${cur:,.4f}</code>\n"
+                f"  Alocado: <code>${margin_used:,.2f}</code> | Notional: <code>${notional:,.2f}</code>\n"
                 f"  P&amp;L: <code>{pl:+.2f}%</code> (<code>${pu:+.2f}</code>)\n"
-                f"  SL: <code>${pos['stop_loss']:,.4f}</code> | TP1: <code>${pos['tp1']:,.4f}</code> | TP2: <code>${pos['tp2']:,.4f}</code>"
+                f"  🛑 SL: {sl_str}{sl_dist}\n"
+                f"  🎯 TP1: {tp1_str}{tp1_dist}\n"
+                f"  🏆 TP2: {tp2_str}"
             )
+
+            # Lista ordens abertas na exchange para esse simbolo
+            if sym in exchange_orders:
+                lines.append(f"  📋 Ordens na exchange: <code>{len(exchange_orders[sym])}</code>")
+
         return "\n".join(lines)
 
     def _history_text(self) -> str:
-        hist = self.agent.trade_history
+        # Preferir o journal (append-only) quando existir
+        events = []
+        try:
+            events = self.agent._journal.tail(n=10, event_type="trade_close")
+        except Exception:
+            events = []
+
+        if events:
+            lines = [f"📋 <b>Histórico (últimos {len(events)})</b>", "────────────────────"]
+            for ev in events[::-1]:
+                pnl = float(ev.get("pnl_usd", 0) or 0)
+                em  = "✅ Lucro" if pnl >= 0 else "❌ Perda"
+                lines.append(
+                    f"{em} | <b>{ev.get('symbol','?')}</b> {ev.get('direction','?')}\n"
+                    f"  Resultado: <code>${pnl:+.2f}</code> | {self._safe(ev.get('reason','?'))}"
+                )
+            return "\n".join(lines)
+
+        hist = self.agent._state.trade_history
         if not hist:
             return "📭 <b>Nenhum trade fechado ainda.</b>"
-        lines = [f"📋 <b>Historico ({len(hist)} trades)</b>", "────────────────────"]
+        lines = [f"📋 <b>Histórico ({len(hist)} trades)</b>", "────────────────────"]
         for t in hist[-10:][::-1]:
             pnl = t.get("pnl_usd", 0)
             em  = "✅ Lucro" if pnl >= 0 else "❌ Perda"
             lines.append(
                 f"{em} | <b>{t.get('symbol','?')}</b> {t.get('direction','?')} {t.get('leverage',1)}x\n"
                 f"  Entrada: <code>${t.get('entry',0):,.4f}</code> → "
-                f"Saida: <code>${t.get('exit',0):,.4f}</code>\n"
+                f"Saída: <code>${t.get('exit',0):,.4f}</code>\n"
                 f"  Resultado: <code>${pnl:+.2f}</code> | {t.get('exit_reason','?')}"
             )
         return "\n".join(lines)

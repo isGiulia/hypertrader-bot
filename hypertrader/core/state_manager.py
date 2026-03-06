@@ -31,6 +31,18 @@ class TradingState:
     peak_equity:        float = 0.0
     dry_run_mode:       bool  = config.DRY_RUN
 
+    # ── "Autopiloto" / disciplina
+    consecutive_wins:   int   = 0
+    consecutive_losses: int   = 0
+    pause_until_ts:     float = 0.0   # epoch seconds; 0 = não pausado por tempo
+    pause_reason:       str   = ""
+
+    # Overrides dinâmicos (persistidos)
+    risk_multiplier:        float = 1.0
+    min_confidence_override: int  = 0  # 0 = usa config.MIN_CONFIDENCE
+
+    last_target_hit_date: str = ""  # YYYY-MM-DD (UTC) para evitar spam
+
 
 class StateManager:
     """
@@ -47,12 +59,20 @@ class StateManager:
             payload = {
                 "dry_run_mode":       state.dry_run_mode,
                 "active_positions":   state.active_positions,
-                "trade_history":      state.trade_history[-100:],   # mantém só os 100 últimos
+                # O journal (NDJSON) mantém o histórico completo.
+                "trade_history":      state.trade_history[-config.TRADE_HISTORY_KEEP:],
                 "stats":              state.stats,
                 "session_pnl":        state.session_pnl,
                 "daily_pnl":          state.daily_pnl,
                 "daily_trades_count": state.daily_trades_count,
                 "peak_equity":        state.peak_equity,
+                "consecutive_wins":   state.consecutive_wins,
+                "consecutive_losses": state.consecutive_losses,
+                "pause_until_ts":     state.pause_until_ts,
+                "pause_reason":       state.pause_reason,
+                "risk_multiplier":    state.risk_multiplier,
+                "min_confidence_override": state.min_confidence_override,
+                "last_target_hit_date": state.last_target_hit_date,
                 "saved_at":           datetime.now(timezone.utc).isoformat(),
             }
             tmp_path = self._filepath + ".tmp"
@@ -99,6 +119,14 @@ class StateManager:
             state.daily_trades_count = saved.get("daily_trades_count", 0)
             state.peak_equity        = saved.get("peak_equity", 0.0)
             state.dry_run_mode       = config.DRY_RUN
+
+            state.consecutive_wins    = int(saved.get("consecutive_wins", 0) or 0)
+            state.consecutive_losses  = int(saved.get("consecutive_losses", 0) or 0)
+            state.pause_until_ts      = float(saved.get("pause_until_ts", 0.0) or 0.0)
+            state.pause_reason        = str(saved.get("pause_reason", "") or "")
+            state.risk_multiplier     = float(saved.get("risk_multiplier", 1.0) or 1.0)
+            state.min_confidence_override = int(saved.get("min_confidence_override", 0) or 0)
+            state.last_target_hit_date = str(saved.get("last_target_hit_date", "") or "")
 
             logger.info(
                 f"State carregado: {len(state.active_positions)} posições, "

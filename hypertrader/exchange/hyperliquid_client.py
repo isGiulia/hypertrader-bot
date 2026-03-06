@@ -37,6 +37,10 @@ class HyperliquidClient:
         self._info       = None
         self._asset_info = {}   # cache: sym -> metadados
 
+        # Cache curto de preços para evitar spam de requests e evitar preço "travado"
+        self._mids_cache: dict = {}
+        self._mids_cache_ts: float = 0.0
+
         if private_key:
             self._init_sdk()
 
@@ -141,14 +145,41 @@ class HyperliquidClient:
         except Exception:
             return {}
 
+    def _get_all_mids_cached(self, ttl_seconds: float = 2.0) -> dict:
+        """Retorna mids com cache de TTL curto para evitar rate-limit."""
+        now = time.time()
+        if self._mids_cache and (now - self._mids_cache_ts) <= ttl_seconds:
+            return self._mids_cache
+        mids = self.get_all_mids() or {}
+        if mids:
+            self._mids_cache = mids
+            self._mids_cache_ts = now
+        return self._mids_cache
+
     def get_mark_price(self, symbol: str) -> float:
+        """Preço atual para cálculos (PnL, decisão market/limit, trailing).
+
+        IMPORTANTE: markPx em metaAndAssetCtxs é carregado uma vez no boot e pode ficar stale.
+        Aqui usamos allMids com cache curto (TTL ~2s), que reflete o preço atual e evita
+        ficar "congelado".
+        """
+        sym = symbol.upper()
+        mids = self._get_all_mids_cached(ttl_seconds=2.0)
         try:
-            info = self.get_asset_info()
-            if symbol in info and info[symbol].get("markPx", 0) > 0:
-                return float(info[symbol]["markPx"])
+            px = float(mids.get(sym, 0) or 0)
+            if px > 0:
+                return px
         except Exception:
             pass
-        return float(self.get_all_mids().get(symbol, 0))
+
+        # fallback: último markPx conhecido (pode estar desatualizado, mas melhor que 0)
+        try:
+            info = self.get_asset_info()
+            if sym in info and info[sym].get("markPx", 0) > 0:
+                return float(info[sym]["markPx"])
+        except Exception:
+            pass
+        return 0.0
 
     def get_meta(self) -> dict:
         try:
@@ -210,8 +241,14 @@ class HyperliquidClient:
             return {"equity": 1000, "margin_used": 0, "free_margin": 1000, "positions": []}
         try:
             r      = self._post("info", {"type": "clearinghouseState", "user": self.wallet_address})
-            equity = float(r.get("marginSummary", {}).get("accountValue", 0))
-            margin = float(r.get("marginSummary", {}).get("totalMarginUsed", 0))
+            ms     = r.get("marginSummary", {})
+            equity = float(ms.get("accountValue", 0))
+            margin = float(ms.get("totalMarginUsed", 0))
+
+            # withdrawable = saldo realmente disponivel para novas ordens
+            # É o campo correto para verificar se pode abrir nova posição
+            withdrawable = float(r.get("withdrawable", 0) or 0)
+            free_margin  = withdrawable if withdrawable > 0 else max(equity - margin, 0)
 
             if equity == 0:
                 try:
@@ -219,14 +256,16 @@ class HyperliquidClient:
                     for bal in spot.get("balances", []):
                         if bal.get("coin") == "USDC":
                             equity = float(bal.get("total", 0))
+                            free_margin = equity
                             break
                 except Exception:
                     pass
 
+            logger.debug(f"Account: equity=${equity:.2f} margin=${margin:.2f} free=${free_margin:.2f} withdrawable=${withdrawable:.2f}")
             return {
                 "equity":      equity,
                 "margin_used": margin,
-                "free_margin": equity - margin,
+                "free_margin": free_margin,
                 "positions":   r.get("assetPositions", []),
                 "raw":         r,
             }

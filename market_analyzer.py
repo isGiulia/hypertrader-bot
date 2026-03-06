@@ -9,6 +9,12 @@ import urllib.request
 import json as _json
 from typing import Optional
 
+try:
+    # Opcional: usa flags do V1 (macro/orderbook etc.)
+    from hypertrader import config as _config
+except Exception:
+    _config = None
+
 
 class MarketAnalyzer:
 
@@ -183,6 +189,72 @@ class MarketAnalyzer:
             "orderbook":             book_ana,
             "recent_trades_summary": self._summarize_trades(trades),
         }
+
+    # ══════════════════════════════════════════════
+    #  V1 (4h/1h) — leve, previsível, pronto para execução
+    # ══════════════════════════════════════════════
+
+    def get_v1_analysis(self, symbol: str) -> dict:
+        """Análise V1 focada em 4h (tendência) + 1h (gatilho).
+
+        Por padrão NÃO inclui macro/orderbook/estrutura avançada (deixa o bot mais estável).
+        Pode ser habilitado via flags em config (ENABLE_*).
+        """
+        errors = []
+
+        candles_1h = self.hl.get_candles(symbol, "1h", 200)
+        candles_4h = self.hl.get_candles(symbol, "4h", 200)
+
+        if not candles_1h:
+            errors.append("candles_1h indisponivel")
+        if not candles_4h:
+            errors.append("candles_4h indisponivel")
+
+        mark_price = self.hl.get_mark_price(symbol)
+        if mark_price == 0:
+            errors.append("mark_price=0 — possivel erro de API")
+
+        tf_1h = self._calculate_v1_indicators(candles_1h) if candles_1h else {}
+        tf_4h = self._calculate_v1_indicators(candles_4h) if candles_4h else {}
+
+        # Tendência 4h (filtro): baseado em preço vs EMA50/EMA200 + inclinação da EMA50
+        trend_4h = self._classify_trend_4h(candles_4h) if candles_4h else {"bias": "UNKNOWN"}
+
+        # Sugerir distância de stop em ATR (1h). O LLM ainda escolhe níveis, mas isso guia.
+        atr = float(tf_1h.get("atr", 0) or 0)
+        stop_atr_mult = 1.2
+        suggested_sl_distance = atr * stop_atr_mult if atr > 0 else 0
+
+        payload = {
+            "symbol": symbol,
+            "style": "4h_1h",
+            "mark_price": mark_price,
+            "data_errors": errors,
+            "tf": {
+                "4h": {**tf_4h, **trend_4h},
+                "1h": tf_1h,
+            },
+            "suggestions": {
+                "stop_atr_mult": stop_atr_mult,
+                "suggested_sl_distance": suggested_sl_distance,
+            },
+        }
+
+        # Extras opcionais
+        if _config and getattr(_config, "ENABLE_MACRO", False):
+            payload["macro_sentiment"] = self._get_macro_context()
+
+        if _config and getattr(_config, "ENABLE_ORDERBOOK", False):
+            book = self.hl.get_l2_book(symbol)
+            payload["orderbook"] = self._analyze_orderbook(book) if book else None
+
+        if _config and getattr(_config, "ENABLE_STRUCTURE", False):
+            payload["market_structure"] = self._analyze_market_structure(candles_4h) if candles_4h else {}
+
+        if _config and getattr(_config, "ENABLE_PATTERNS", False):
+            payload["patterns"] = self._detect_patterns(candles_1h) if candles_1h else {}
+
+        return payload
 
     # ══════════════════════════════════════════════
     #  OHLCV
@@ -408,6 +480,86 @@ class MarketAnalyzer:
             }
         except Exception:
             return {}
+
+    # ══════════════════════════════════════════════
+    #  Indicadores V1 (4h/1h) — mínimo necessário
+    # ══════════════════════════════════════════════
+
+    def _calculate_v1_indicators(self, candles: list) -> dict:
+        """Cálculo leve para V1.
+
+        Retorna apenas o que o bot realmente usa no V1: EMA, RSI, ATR e volume ratio.
+        """
+        if not candles or len(candles) < 60:
+            return {}
+        try:
+            _, highs, lows, closes, volumes = self._extract_ohlcv(candles)
+            if len(closes) < 60:
+                return {}
+
+            price = float(closes[-1])
+            ema21 = self._ema(closes, 21)
+            ema50 = self._ema(closes, 50)
+            ema200 = self._ema(closes, 200) if len(closes) >= 200 else self._ema(closes, 120)
+            rsi14 = self._rsi(closes, 14)
+            atr14 = self._atr(highs, lows, closes, 14)
+            atr_pct = (atr14 / price * 100) if price > 0 else 0
+
+            vol_ratio = 1.0
+            if volumes and len(volumes) >= 20:
+                vol_avg = sum(volumes[-20:]) / 20
+                vol_cur = volumes[-1]
+                vol_ratio = (vol_cur / vol_avg) if vol_avg > 0 else 1.0
+
+            return {
+                "price": round(price, 6),
+                "ema21": round(float(ema21), 6),
+                "ema50": round(float(ema50), 6),
+                "ema200": round(float(ema200), 6),
+                "rsi14": round(float(rsi14), 2),
+                "atr": round(float(atr14), 6),
+                "atr_pct": round(float(atr_pct), 3),
+                "vol_ratio": round(float(vol_ratio), 3),
+            }
+        except Exception:
+            return {}
+
+    def _classify_trend_4h(self, candles_4h: list) -> dict:
+        """Classifica tendência no 4h (filtro) de forma previsível.
+
+        Bias:
+          - UPTREND: preço acima EMA50 e EMA50 acima EMA200 e EMA50 subindo
+          - DOWNTREND: preço abaixo EMA50 e EMA50 abaixo EMA200 e EMA50 caindo
+          - SIDEWAYS: caso contrário
+        """
+        if not candles_4h or len(candles_4h) < 80:
+            return {"bias": "UNKNOWN"}
+        try:
+            _, _, _, closes, _ = self._extract_ohlcv(candles_4h)
+            if len(closes) < 80:
+                return {"bias": "UNKNOWN"}
+
+            price = float(closes[-1])
+            ema50_now = float(self._ema(closes, 50))
+            ema200_now = float(self._ema(closes, 200)) if len(closes) >= 200 else float(self._ema(closes, 120))
+
+            # inclinação aproximada (EMA50 agora vs EMA50 5 candles atrás)
+            ema50_prev = float(self._ema(closes[:-5], 50)) if len(closes) > 55 else ema50_now
+            slope = "up" if ema50_now > ema50_prev else "down" if ema50_now < ema50_prev else "flat"
+
+            if price > ema50_now and ema50_now > ema200_now and slope == "up":
+                bias = "UPTREND"
+            elif price < ema50_now and ema50_now < ema200_now and slope == "down":
+                bias = "DOWNTREND"
+            else:
+                bias = "SIDEWAYS"
+
+            return {
+                "bias": bias,
+                "ema50_slope": slope,
+            }
+        except Exception:
+            return {"bias": "UNKNOWN"}
 
     # ══════════════════════════════════════════════
     #  VOLUME

@@ -7,31 +7,60 @@ Todas as constantes e variáveis de ambiente ficam aqui.
 import os
 from dotenv import load_dotenv
 
+from pathlib import Path
+
 load_dotenv()
 
 
+# ── Estilo de trading (V1)
+# V1 "4h/1h": 4h define tendência (filtro), 1h define gatilho de entrada.
+TRADING_STYLE = os.getenv("TRADING_STYLE", "4h_1h").lower()
+
 # ── Configurações de trading
 SYMBOLS          = ["BTC", "ETH", "SOL", "AVAX"]
-MAX_POSITIONS    = 4
-RISK_PER_TRADE   = 0.03  # 3% — adequado para conta pequena (<$200)          # 2% do capital por trade
-MAX_TRADES_DAY   = 6
-DAILY_LOSS_LIMIT = 0.06          # 6% de perda diária = stop total
+
+# V1 recomenda começar conservador e evoluir por config.
+# 0.015 = 1.5% por trade (ainda agressivo). Ajuste via env RISK_PER_TRADE.
+RISK_PER_TRADE   = float(os.getenv("RISK_PER_TRADE", "0.015"))
+
+# Teto operacional (não meta): o bot só entra se o sinal passar no RiskManager.
+MAX_TRADES_DAY   = int(os.getenv("MAX_TRADES_DAY", "2"))
+MAX_POSITIONS    = int(os.getenv("MAX_POSITIONS", "2"))
+
+# Stop diário: pausa novas entradas (monitor continua).
+DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "0.05"))
 DRAWDOWN_HALF    = 10.0          # % drawdown para reduzir risco pela metade
 DRAWDOWN_STOP    = 20.0          # % drawdown para parar completamente
 MIN_CONFIDENCE   = 60            # % mínimo de confiança do sinal
 TAKE_PROFIT_RATIO = 1.5          # R:R mínimo para entrar
 PARTIAL_TP_PCT   = 0.50          # % do size fechado no TP1
-TRAILING_STOP    = True
+TRAILING_STOP    = os.getenv("TRAILING_STOP", "true").lower() == "true"
 MARKET_ORDER_THRESHOLD = 0.3     # % de distância para usar market order
 
+# ── Features (deixe o V1 leve e previsível)
+# Para 4h/1h, o padrão é NÃO usar macro/orderbook/estrutura avançada no core.
+ENABLE_MACRO      = os.getenv("ENABLE_MACRO", "false").lower() == "true"
+ENABLE_ORDERBOOK  = os.getenv("ENABLE_ORDERBOOK", "false").lower() == "true"
+ENABLE_STRUCTURE  = os.getenv("ENABLE_STRUCTURE", "false").lower() == "true"
+ENABLE_PATTERNS   = os.getenv("ENABLE_PATTERNS", "false").lower() == "true"
+
 # ── Alavancagem por símbolo
+# "auto": usa alavancagem baixa e consistente (profissional/robusto).
+# "max": tenta usar o máximo da moeda (NÃO recomendado; risco alto). Ainda respeita caps.
+LEVERAGE_MODE     = os.getenv("LEVERAGE_MODE", "auto").lower()
+
+# Cap padrão do V1 (segurança). Você pode aumentar via env LEVERAGE_CAP.
+LEVERAGE_CAP      = int(os.getenv("LEVERAGE_CAP", "5"))
+
+# Preferência por símbolo (só usada em modo "auto").
 LEVERAGE_MAP = {
     "BTC": 5, "ETH": 5,
     "SOL": 3, "AVAX": 3,
-    "PEPE": 2,
 }
-MAX_LEVERAGE      = 10
-LEVERAGE_FALLBACK = 3
+
+# Hard cap final (não excede isso mesmo em "max", a menos que você altere por env).
+MAX_LEVERAGE      = int(os.getenv("MAX_LEVERAGE", "20"))
+LEVERAGE_FALLBACK = int(os.getenv("LEVERAGE_FALLBACK", "3"))
 
 # ── Intervalos (segundos)
 ANALYSIS_INTERVAL  = 1800   # a cada 30 min
@@ -55,7 +84,31 @@ MODEL_TRADING = "claude-haiku-4-5-20251001"   # análise de mercado (rápido + b
 MODEL_REPORT  = "claude-sonnet-4-6"            # relatórios e chat (mais inteligente)
 
 # ── Arquivo de estado
-STATE_FILE = "state.json"
+# Diretório de dados persistentes (state, journal, etc.)
+DATA_DIR = os.getenv("DATA_DIR", "data")
+Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+
+STATE_FILE = str(Path(DATA_DIR) / "state.json")
+
+# Journal append-only (histórico "para sempre")
+JOURNAL_FILE = str(Path(DATA_DIR) / "journal.ndjson")
+
+# Quantos trades fechados manter dentro do state.json (o journal mantém tudo)
+TRADE_HISTORY_KEEP = int(os.getenv("TRADE_HISTORY_KEEP", "5000"))
+
+# ── Auto-controle (profissionalismo)
+# Se ganhar no 1º trade do dia, pode pausar novas entradas até o dia seguinte.
+STOP_AFTER_FIRST_WIN = os.getenv("STOP_AFTER_FIRST_WIN", "true").lower() == "true"
+
+# Se perder muitas vezes seguidas, reduz risco e/ou pausa para "revisar".
+MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
+LOSS_PAUSE_HOURS = float(os.getenv("LOSS_PAUSE_HOURS", "2"))
+LOSS_RISK_MULTIPLIER = float(os.getenv("LOSS_RISK_MULTIPLIER", "0.5"))
+LOSS_CONFIDENCE_ADD = int(os.getenv("LOSS_CONFIDENCE_ADD", "5"))
+
+# Meta de patrimônio (USDC). Se 0, desativado.
+TARGET_EQUITY = float(os.getenv("TARGET_EQUITY", "0") or 0)
+ON_TARGET_ACTION = (os.getenv("ON_TARGET_ACTION", "pause") or "pause").lower()
 
 # ── Fuso horário para exibição nas mensagens Telegram
 # Use o nome IANA da sua timezone. Exemplos:
