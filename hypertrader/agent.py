@@ -6,6 +6,7 @@ Esta classe é o "maestro": coordena os módulos mas não implementa nada.
 Cada responsabilidade real fica no módulo especializado.
 """
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -58,6 +59,9 @@ class HyperTraderAgent:
         self._current_day  = datetime.now(timezone.utc).date()
         self._telegram     = None
         self._last_reconcile_ts = 0.0
+
+        # ── Loop principal (setado em run_autonomous) — usado pelo _notify
+        self._main_loop    = None
 
         # Journal persistente (append-only) — histórico "para sempre"
         self._journal = TradeJournal(config.JOURNAL_FILE)
@@ -173,6 +177,8 @@ class HyperTraderAgent:
     # ── Loop principal
 
     async def run_autonomous(self):
+        # Guarda referência ao loop principal para uso do _notify (thread-safe)
+        self._main_loop = asyncio.get_running_loop()
         logger.info("Loop autônomo iniciado")
         self._notify(messages.startup_message())
 
@@ -348,6 +354,20 @@ class HyperTraderAgent:
 
         leverage = self._get_leverage(symbol)
 
+        # ═══════════════════════════════════════════════════════════════
+        #  DEBUG TEMPORÁRIO — salva o payload enviado ao Claude
+        #  REMOVER DEPOIS DO DIAGNÓSTICO
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            import os
+            os.makedirs("logs", exist_ok=True)
+            with open(f"logs/payload_{symbol}.json", "w", encoding="utf-8") as _f:
+                json.dump(data, _f, indent=2, ensure_ascii=False, default=str)
+            logger.info(f"[DEBUG] payload_{symbol}.json salvo ({len(str(data))} chars)")
+        except Exception as _e:
+            logger.warning(f"[DEBUG] falha ao salvar payload: {_e}")
+        # ═══════════════════════════════════════════════════════════════
+
         analysis = self._claude.ask(
             (
                 f"{symbol}/USDC perp Hyperliquid. Estilo=4h/1h (4h tendência, 1h gatilho). "
@@ -356,6 +376,20 @@ class HyperTraderAgent:
             ),
             data, symbol=symbol
         )
+
+        # ═══════════════════════════════════════════════════════════════
+        #  DEBUG TEMPORÁRIO — salva a resposta crua do Claude
+        #  REMOVER DEPOIS DO DIAGNÓSTICO
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            with open(f"logs/resposta_{symbol}.txt", "w", encoding="utf-8") as _f:
+                _f.write(analysis or "")
+            logger.info(f"[DEBUG] resposta_{symbol}.txt salva ({len(analysis or '')} chars)")
+            logger.info(f"[DEBUG] {symbol} resposta (primeiros 800 chars): {str(analysis)[:800]}")
+        except Exception as _e:
+            logger.warning(f"[DEBUG] falha ao salvar resposta: {_e}")
+        # ═══════════════════════════════════════════════════════════════
+
         signal = self._claude.extract_signal(analysis)
         if signal:
             signal["symbol"]   = symbol
@@ -761,15 +795,27 @@ class HyperTraderAgent:
         ))
 
     def _notify(self, msg: str):
-        if self._telegram and config.TELEGRAM_CHAT_ID:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop and loop.is_running():
-                    asyncio.ensure_future(self._telegram.notify(config.TELEGRAM_CHAT_ID, msg))
-                else:
-                    loop.run_until_complete(self._telegram.notify(config.TELEGRAM_CHAT_ID, msg))
-            except Exception as e:
-                logger.error(f"Notify: {e}")
+        """
+        Envia mensagem no Telegram de forma thread-safe.
+
+        O bot pode chamar _notify de dentro do loop asyncio (thread principal)
+        ou de threads secundárias (ex: TradeExecutor). Usamos
+        run_coroutine_threadsafe para agendar no loop principal sem depender
+        de event loop na thread atual.
+        """
+        if not (self._telegram and config.TELEGRAM_CHAT_ID):
+            return
+        try:
+            loop = self._main_loop
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._telegram.notify(config.TELEGRAM_CHAT_ID, msg),
+                    loop,
+                )
+            else:
+                logger.warning(f"Notify sem loop ativo: {msg[:80]}")
+        except Exception as e:
+            logger.error(f"Notify: {e}")
 
     @property
     def telegram_bot(self):

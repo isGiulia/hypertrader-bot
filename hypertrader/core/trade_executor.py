@@ -3,6 +3,8 @@ core/trade_executor.py — Execução de trades na exchange.
 
 Princípio Clean Code: "Funções devem fazer uma coisa e fazê-la bem."
 Cada método aqui tem uma responsabilidade clara e nomeada.
+
+V2 — Stop Loss com retry automático (evita posição exposta por falha de rede).
 """
 import time
 import logging
@@ -163,20 +165,71 @@ class TradeExecutor:
     # ── Helpers privados
 
     def _place_stop_loss(self, symbol: str, is_buy: bool,
-                          size: float, price: float) -> Optional[int]:
-        try:
-            result = self._hl.place_order(
-                symbol=symbol, is_buy=not is_buy,
-                size=size, price=price,
-                order_type="stop", reduce_only=True,
-            )
-            oid = result.get("order_id")
-            logger.info(f"SL [{symbol}] @ ${price:.4f} oid={oid}")
-            return oid
-        except Exception as e:
-            logger.error(f"SL [{symbol}]: {e}")
-            self._notify(f"🚨 ERRO SL — {symbol}: {e} — FECHE MANUALMENTE!")
-            return None
+                          size: float, price: float,
+                          max_attempts: int = 3) -> Optional[int]:
+        """
+        Coloca Stop Loss com retry automático.
+
+        Estratégia:
+          - Tenta até `max_attempts` vezes (default: 3).
+          - Backoff exponencial entre tentativas: 1s, 2s, 4s...
+          - Se TODAS falharem, notifica o usuário. O PositionMonitor
+            vai tentar novamente no próximo ciclo via `_ensure_stop_loss`
+            (a cada 30s), então a posição não fica permanentemente
+            desprotegida — apenas por alguns segundos.
+
+        Args:
+            symbol: ativo (BTC, ETH, ...)
+            is_buy: True se posição LONG (SL fecha com SELL), False se SHORT
+            size: tamanho em contratos
+            price: preço de trigger do SL
+            max_attempts: tentativas máximas antes de desistir
+
+        Returns:
+            order_id se sucesso, None se todas as tentativas falharem.
+        """
+        closing_is_buy = not is_buy   # LONG → fecha com SELL | SHORT → fecha com BUY
+        last_error     = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = self._hl.place_order(
+                    symbol=symbol,
+                    is_buy=closing_is_buy,
+                    size=size,
+                    price=price,
+                    order_type="stop",
+                    reduce_only=True,
+                )
+                oid = result.get("order_id")
+
+                if result.get("status") == "ok" and oid:
+                    if attempt > 1:
+                        logger.info(f"SL [{symbol}] OK na tentativa {attempt}/{max_attempts}")
+                    logger.info(f"SL [{symbol}] @ ${price:.4f} oid={oid}")
+                    return oid
+
+                last_error = f"API respondeu sem order_id: {str(result)[:150]}"
+                logger.warning(f"SL [{symbol}] tentativa {attempt}/{max_attempts}: {last_error}")
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"SL [{symbol}] tentativa {attempt}/{max_attempts} exception: {e}")
+
+            # Backoff exponencial (só espera se ainda houver tentativas)
+            if attempt < max_attempts:
+                wait = 2 ** (attempt - 1)   # 1s, 2s, 4s...
+                time.sleep(wait)
+
+        # Todas as tentativas falharam
+        logger.error(f"SL [{symbol}] FALHOU após {max_attempts} tentativas: {last_error}")
+        self._notify(
+            f"⚠️ <b>SL falhou {max_attempts}x — {symbol}</b>\n"
+            f"Posição <b>temporariamente sem proteção</b>.\n"
+            f"O monitor tentará recolocar em até 30s.\n"
+            f"Erro: <code>{str(last_error)[:120]}</code>"
+        )
+        return None
 
     def _place_take_profit(self, symbol: str, is_buy: bool,
                             size: float, price: float, label: str) -> Optional[int]:

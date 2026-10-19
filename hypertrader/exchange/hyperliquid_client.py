@@ -456,7 +456,7 @@ class HyperliquidClient:
             price  = self.round_price(price)
             ot_sdk = {"trigger": {
                 "isMarket":  True,
-                "triggerPx": str(price),
+                "triggerPx": price,
                 "tpsl":      "sl"
             }}
         else:

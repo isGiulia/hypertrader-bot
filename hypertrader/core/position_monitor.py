@@ -3,6 +3,10 @@ core/position_monitor.py — Monitoramento de posições abertas.
 
 Princípio Clean Code: "Nomes revelam intenção."
 Cada método tem um nome que descreve exatamente o que ele faz.
+
+V2 — Inclui guarda-corpo crítico: garante que toda posição LIVE tem SL
+na exchange. Sem isso, uma falha na hora da entrada deixa a posição
+exposta sem proteção.
 """
 import logging
 from datetime import datetime, timezone
@@ -26,6 +30,7 @@ class PositionMonitor:
       - TP2 atingido (fecha restante)
       - Trailing stop atualizado
       - Alerta de liquidação próxima
+      - [NOVO] SL ausente na exchange (recoloca automaticamente)
     """
 
     def __init__(self, exchange: HyperliquidClient,
@@ -133,6 +138,7 @@ class PositionMonitor:
         """
         LIVE: confia nas ordens de SL/TP já colocadas na exchange.
               Bot apenas:
+                0. [NOVO] Garante que a posição TEM SL (recoloca se faltar)
                 1. Alerta se próximo de liquidação
                 2. Detecta TP1 via redução de tamanho (e move SL para breakeven)
                 3. Atualiza trailing stop após TP1
@@ -146,6 +152,18 @@ class PositionMonitor:
 
         real_pnl_usd = real_positions.get(symbol, {}).get("unrealized_pnl", None)
         self._check_liquidation_risk(symbol, pos, pnl_pct, real_pnl_usd)
+
+        # ─────────────────────────────────────────────────────────
+        #  GUARDA-CORPO CRÍTICO (LIVE):
+        #  Garante que toda posição tem SL na exchange.
+        #  Se o SL falhou na entrada (ex: erro de API), recoloca agora.
+        #  Se não conseguir, avisa e fecha por segurança.
+        # ─────────────────────────────────────────────────────────
+        if not config.DRY_RUN and not pos.get("sl_order_id"):
+            self._ensure_stop_loss(symbol, pos, current, is_long, active_positions)
+            # Se a posição foi fechada por segurança, sai do método
+            if symbol not in active_positions:
+                return
 
         if config.DRY_RUN:
             # Simulação: fecha SL/TP internamente
@@ -195,6 +213,64 @@ class PositionMonitor:
         # Trailing stop após TP1
         if pos["tp1_hit"] and config.TRAILING_STOP:
             self._update_trailing(symbol, pos, current, is_long, active_positions)
+
+    # ── Guarda-corpo: SL obrigatório em LIVE
+
+    def _ensure_stop_loss(self, symbol: str, pos: dict, current: float,
+                           is_long: bool, active_positions: dict):
+        """
+        Garante que a posição tem SL na exchange.
+
+        Chamado a cada ciclo quando `pos["sl_order_id"]` está vazio.
+        Tenta recolocar o SL. Se falhar ou não tiver preço, fecha a posição
+        por segurança (melhor sair com lucro/perda pequena do que sem proteção).
+        """
+        sl_price = float(pos.get("stop_loss", 0) or 0)
+
+        if sl_price <= 0:
+            # Sem preço de SL definido — não dá pra proteger. Fecha.
+            logger.error(f"{symbol}: sem SL e sem preço — fechando por segurança")
+            self._notify(
+                f"🚨 <b>{symbol} sem SL definido</b>\n"
+                f"Fechando posição por segurança."
+            )
+            self._close_and_remove(symbol, pos, current, "SL ausente", active_positions)
+            return
+
+        logger.warning(f"{symbol}: posição SEM SL — tentando recolocar @ ${sl_price:.4f}")
+
+        try:
+            r = self._hl.place_order(
+                symbol=symbol,
+                is_buy=not is_long,     # LONG fecha com SELL, SHORT fecha com BUY
+                size=float(pos["size"]),
+                price=sl_price,
+                order_type="stop",
+                reduce_only=True,
+            )
+
+            if r.get("status") == "ok" and r.get("order_id"):
+                pos["sl_order_id"] = r["order_id"]
+                active_positions[symbol] = pos
+                self._on_changed()
+                self._notify(
+                    f"🔧 <b>SL recolocado — {symbol}</b>\n"
+                    f"Posição estava <b>sem proteção</b>. Agora SL em "
+                    f"<code>${sl_price:.4f}</code> (oid={r['order_id']})"
+                )
+            else:
+                logger.error(f"{symbol}: falha ao recolocar SL — {r}")
+                self._notify(
+                    f"🚨 <b>Falha ao recolocar SL — {symbol}</b>\n"
+                    f"Posição segue SEM PROTEÇÃO. <b>Feche manualmente!</b>"
+                )
+        except Exception as e:
+            logger.error(f"{symbol}: exception recolocando SL — {e}")
+            self._notify(
+                f"🚨 <b>Erro recolocando SL — {symbol}</b>\n"
+                f"<code>{str(e)[:150]}</code>\n"
+                f"Posição segue SEM PROTEÇÃO. <b>Feche manualmente!</b>"
+            )
 
     def _handle_tp1(self, symbol: str, pos: dict, current: float,
                      entry: float, tp2: float, pnl_pct: float,

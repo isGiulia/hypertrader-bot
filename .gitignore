@@ -1,5 +1,7 @@
 # secrets
 .env
+.venv/
+venv/
 
 # runtime data
 data/
@@ -13,8 +15,15 @@ journal.ndjson
 # python
 __pycache__/
 *.pyc
+.env
 .venv/
+venv/
+.history/
+backups/
 
 # editor
 .vscode/
 .DS_Store
+
+
+.history/

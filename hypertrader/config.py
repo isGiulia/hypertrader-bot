@@ -3,6 +3,8 @@ config.py — Configurações centralizadas do HyperTrader.
 
 Princípio Clean Code: "Separe configuração de lógica."
 Todas as constantes e variáveis de ambiente ficam aqui.
+
+V2 — Features ligadas, disciplina recalibrada.
 """
 import os
 from dotenv import load_dotenv
@@ -37,12 +39,13 @@ PARTIAL_TP_PCT   = 0.50          # % do size fechado no TP1
 TRAILING_STOP    = os.getenv("TRAILING_STOP", "true").lower() == "true"
 MARKET_ORDER_THRESHOLD = 0.3     # % de distância para usar market order
 
-# ── Features (deixe o V1 leve e previsível)
-# Para 4h/1h, o padrão é NÃO usar macro/orderbook/estrutura avançada no core.
-ENABLE_MACRO      = os.getenv("ENABLE_MACRO", "false").lower() == "true"
-ENABLE_ORDERBOOK  = os.getenv("ENABLE_ORDERBOOK", "false").lower() == "true"
-ENABLE_STRUCTURE  = os.getenv("ENABLE_STRUCTURE", "false").lower() == "true"
-ENABLE_PATTERNS   = os.getenv("ENABLE_PATTERNS", "false").lower() == "true"
+# ── Features — LIGADAS para dar contexto ao Claude
+# Com contexto macro/orderbook/estrutura/padrões, o Claude decide melhor
+# e deixa de ser conservador por falta de informação.
+ENABLE_MACRO      = os.getenv("ENABLE_MACRO", "true").lower() == "true"
+ENABLE_ORDERBOOK  = os.getenv("ENABLE_ORDERBOOK", "true").lower() == "true"
+ENABLE_STRUCTURE  = os.getenv("ENABLE_STRUCTURE", "true").lower() == "true"
+ENABLE_PATTERNS   = os.getenv("ENABLE_PATTERNS", "true").lower() == "true"
 
 # ── Alavancagem por símbolo
 # "auto": usa alavancagem baixa e consistente (profissional/robusto).
@@ -79,9 +82,9 @@ TELEGRAM_TOKEN     = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
 TELEGRAM_ALLOWED   = os.getenv("TELEGRAM_ALLOWED_IDS", "0")
 
-# ── Modelos Claude
-MODEL_TRADING = "claude-haiku-4-5-20251001"   # análise de mercado (rápido + barato)
-MODEL_REPORT  = "claude-sonnet-4-6"            # relatórios e chat (mais inteligente)
+
+MODEL_TRADING = os.getenv("MODEL_TRADING", "claude-haiku-4-5-20251001")
+MODEL_REPORT  = os.getenv("MODEL_REPORT",  "claude-haiku-4-5-20251001")
 
 # ── Arquivo de estado
 # Diretório de dados persistentes (state, journal, etc.)
@@ -97,8 +100,9 @@ JOURNAL_FILE = str(Path(DATA_DIR) / "journal.ndjson")
 TRADE_HISTORY_KEEP = int(os.getenv("TRADE_HISTORY_KEEP", "5000"))
 
 # ── Auto-controle (profissionalismo)
-# Se ganhar no 1º trade do dia, pode pausar novas entradas até o dia seguinte.
-STOP_AFTER_FIRST_WIN = os.getenv("STOP_AFTER_FIRST_WIN", "true").lower() == "true"
+# DESLIGADO: parar após o 1º win é conservador demais para swing trade.
+# Se quiser religar no futuro, mude via env STOP_AFTER_FIRST_WIN=true.
+STOP_AFTER_FIRST_WIN = os.getenv("STOP_AFTER_FIRST_WIN", "false").lower() == "true"
 
 # Se perder muitas vezes seguidas, reduz risco e/ou pausa para "revisar".
 MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
