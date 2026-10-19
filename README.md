@@ -46,48 +46,15 @@ pip install -r requirements.txt
 pip install hyperliquid-python-sdk
 ```
 
-### 5. Criar o arquivo de configuração `.env`
 
-O arquivo `.env` **não existe no repositório** — você cria ele manualmente com suas credenciais:
+### 5. Configurar as variáveis de ambiente
+O repositório inclui um arquivo `.env.example` com todas as variáveis necessárias (sem os valores reais, por segurança). Faça uma cópia dele para criar o seu `.env`:
 
-```bash
+cp .env.example .env
+
+Agora, abra o arquivo `.env` e substitua os valores de exemplo pelas suas credenciais reais:
+
 nano .env
-```
-
-Cole o conteúdo abaixo substituindo pelos seus dados reais:
-
-```env
-# ── Anthropic (Claude AI) ──────────────────────────────────
-# Obtenha em: https://console.anthropic.com/settings/keys
-ANTHROPIC_API_KEY=sk-ant-XXXXXXXXXXXXXXXXXXXXXXXX
-
-# ── Hyperliquid ────────────────────────────────────────────
-# Endereço público da sua carteira (ex: MetaMask, Rabby)
-HL_WALLET_ADDRESS=0xSEU_ENDERECO_AQUI
-
-# Chave privada da sua carteira — NUNCA compartilhe isso!
-# Para exportar da Rabby: Menu → Gerenciar Endereço → Backup da Chave Privada
-HL_PRIVATE_KEY=0xSUA_CHAVE_PRIVADA_AQUI
-
-# ── Telegram ───────────────────────────────────────────────
-# Token do bot criado no @BotFather
-TELEGRAM_BOT_TOKEN=0000000000:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-
-# Seu Chat ID (obtenha enviando /start para @userinfobot)
-TELEGRAM_CHAT_ID=000000000
-
-# Seu Chat ID novamente (define quem pode controlar o bot)
-TELEGRAM_ALLOWED_IDS=000000000
-
-# ── Modo de operação ───────────────────────────────────────
-# True = usa a rede de testes (dinheiro simulado) — RECOMENDADO para começar
-# False = usa a rede real (dinheiro real)
-USE_TESTNET=True
-
-# True = simula trades sem enviar ordens para a exchange
-# False = executa ordens reais na exchange
-DRY_RUN=True
-```
 
 Salvar: `Ctrl+O` → Enter → `Ctrl+X`
 

@@ -27,3 +27,4 @@ backups/
 
 
 .history/
+__pycache__/
