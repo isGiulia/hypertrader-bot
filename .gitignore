@@ -28,3 +28,5 @@ backups/
 
 .history/
 __pycache__/
+logs/
+*.log
